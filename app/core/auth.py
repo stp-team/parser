@@ -1,6 +1,7 @@
 import re
 
 import requests
+from aiohttp import ClientSession
 
 from app.core.config import settings
 
@@ -23,35 +24,32 @@ BASE_HEADERS = {
 }
 
 
-async def get_csrf(base_url: str) -> tuple[requests.Session, str]:
+async def get_csrf(session: ClientSession) -> tuple[requests.Session, str]:
     """Получает CSRF токен со страницы авторизации.
-
-    Args:
-        base_url: Базовый URL API
 
     Returns:
         Сессия и csrf токен
     """
-    session = requests.Session()
     session.headers.update(BASE_HEADERS)
 
-    response = session.get(f"{base_url}/site/login")
+    response = await session.get(f"{settings.OKC_BASE_URL}/site/login")
+    response_text = await response.text()
 
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to get login page: HTTP {response.status_code}")
+    if response.status != 200:
+        raise RuntimeError(f"Failed to get login page: HTTP {response.status}")
 
     # Достаем CSRF
     csrf_pattern = r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)["\']'
-    match = re.search(csrf_pattern, response.text)
+    match = re.search(csrf_pattern, response_text)
 
     if not match:
         raise RuntimeError("Could not find CSRF token in login page")
 
     csrf_token = match.group(1)
-    return session, csrf_token
+    return csrf_token
 
 
-async def authenticate(username: str, password: str) -> requests.Session | None:
+async def authenticate(username: str, password: str, session: ClientSession) -> bool:
     """Производит авторизацию и возвращает сессию.
 
     Args:
@@ -63,7 +61,7 @@ async def authenticate(username: str, password: str) -> requests.Session | None:
     """
 
     # Get CSRF token and session with cookies
-    session, csrf_token = await get_csrf(settings.OKC_BASE_URL)
+    csrf_token = await get_csrf(session=session)
 
     # Set Content-Type for POST request
     session.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
@@ -76,17 +74,10 @@ async def authenticate(username: str, password: str) -> requests.Session | None:
         "login-button": "",
     }
 
-    response = session.post(settings.OKC_BASE_URL + "/site/login", data=payload)
+    response = await session.post(settings.OKC_BASE_URL + "/site/login", data=payload)
 
     # После авторизации идет переход на другую страницу, проверяем на 302 код
-    if response.status_code not in [200, 302]:
-        raise RuntimeError(f"Login failed: HTTP {response.status_code}")
+    if response.status not in [200, 302]:
+        raise RuntimeError(f"Login failed: HTTP {response.status}")
 
-    if response.status_code == 200 and (
-        "login" in response.url.lower() or "LoginForm" in response.text
-    ):
-        raise RuntimeError(
-            "Login unsuccessful. Possibly wrong credentials or invalid CSRF token."
-        )
-
-    return session
+    return True

@@ -8,10 +8,10 @@ class SlAPI(BaseAPI):
         self.service_url = "genesys/ntp"
 
     async def get_vq_chat_filter(self) -> SlRootModel | None:
-        response = self.post(endpoint=f"{self.service_url}/get-vq-chat-filter")
+        response = await self.post(endpoint=f"{self.service_url}/get-vq-chat-filter")
         try:
-            data = SlRootModel.model_validate(response.json())
-            return data
+            data = await response.json()
+            return SlRootModel.model_validate(data)
         except Exception as e:
             print("Parsing error:", e)
             return None
@@ -32,14 +32,14 @@ class SlAPI(BaseAPI):
             "queues": queues,
         }
 
-        response = self.post(
+        response = await self.post(
             endpoint=f"{self.service_url}/get-chat-sl-report",
             json=payload,
         )
 
         try:
-            data = ReportData.model_validate(response.json())
-            return data
+            data = await response.json()
+            return ReportData.model_validate(data)
         except Exception as e:
             print("Parsing error:", e)
             return None

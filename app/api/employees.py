@@ -9,13 +9,20 @@ class EmployeesAPI(BaseAPI):
         super().__init__(session)
         self.service_url = "dossier"
 
-    async def get_employees(self) -> list[Employee] | None:
+    async def get_employees(self, exclude_fired: bool = False) -> list[Employee] | None:
         employee_list_adapter = TypeAdapter(list[Employee])
 
-        response = self.post(endpoint=f"{self.service_url}/api/get-employees")
+        response = await self.post(f"{self.service_url}/api/get-employees")
 
         try:
-            return employee_list_adapter.validate_python(response.json())
+            data = await response.json()
+
+            employees = employee_list_adapter.validate_python(data)
+
+            if exclude_fired:
+                employees = [e for e in employees if not e.fired_date]
+
+            return employees
         except Exception as e:
             print("Parsing error:", e)
             return None
@@ -40,9 +47,9 @@ class EmployeesAPI(BaseAPI):
         if employee_id is None:
             return None
 
-        response = self.post(
+        response = await self.post(
             endpoint=f"{self.service_url}/api/get-dossier",
-            data={
+            json={
                 "employee": employee_id,
                 "showKpi": show_kpi,
                 "showCriticals": show_criticals,
@@ -50,7 +57,8 @@ class EmployeesAPI(BaseAPI):
         )
 
         try:
-            employee = EmployeeData.model_validate(response.json())
+            data = await response.json()
+            employee = EmployeeData.model_validate(data)
             return employee
         except Exception as e:
             print("Parsing error:", e)
