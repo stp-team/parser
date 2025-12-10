@@ -8,9 +8,9 @@ from aiohttp import ClientSession
 from app.core.auth import authenticate
 from app.core.config import settings
 from app.core.scheduler import scheduler
+from app.services.logger import setup_logging
 from app.tasks.employees import fill_birthdays
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +22,8 @@ def signal_handler(sig, frame):
 
 
 async def main():
+    setup_logging()
+
     try:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)

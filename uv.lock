@@ -168,6 +168,15 @@ wheels = [
 ]
 
 [[package]]
+name = "betterlogging"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/fb/9f400b2faedab8229698356580de53e97cf3569d40a3a826d07773e762eb/betterlogging-1.0.0.tar.gz", hash = "sha256:324fab02af0a1a6ea05869ac8dd5b1bcfa59f6fa882cf75e24dfa99f412f54d3", size = 10154, upload-time = "2024-02-05T07:59:47.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/9b/db1ed2b226a3dd243a09e449a21797e8c386fbce22f8c559a88b5c40de90/betterlogging-1.0.0-py3-none-any.whl", hash = "sha256:b20f4d39af98faf540e9c3fe3d0a08872b3c5da0d02724e7c33be7358aae2a7b", size = 10887, upload-time = "2024-02-05T07:59:46.103Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.11.12"
 source = { registry = "https://pypi.org/simple" }
@@ -450,6 +459,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "apscheduler" },
+    { name = "betterlogging" },
     { name = "dishka" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -461,6 +471,7 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.2" },
     { name = "apscheduler", specifier = ">=3.11.1" },
+    { name = "betterlogging", specifier = ">=1.0.0" },
     { name = "dishka", specifier = ">=1.4.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
