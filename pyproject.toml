@@ -1,0 +1,52 @@
+[project]
+name = "parser"
+version = "0.1.0"
+description = "Парсер "
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "requests>=2.32.5",
+]
+
+[tool.uv.sources]
+stp-database = { git = "https://github.com/STP-Team/stp-database" }
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+strict = true
+exclude = ["venv", ".venv", "alembic"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py310"
+exclude = ["alembic"]
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle errors
+    "W", # pycodestyle warnings
+    "F", # pyflakes
+    "I", # isort
+    "B", # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+    "ARG001", # unused arguments in functions
+    "T201", # print statements are not allowed
+]
+ignore = [
+    "E501", # line too long, handled by black
+    "B008", # do not perform function calls in argument defaults
+    "W191", # indentation contains tabs
+    "B904", # Allow raising exceptions without from e, for HTTPException
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+exclude = ["README.md", ".github/"]
