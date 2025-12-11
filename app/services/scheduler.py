@@ -16,7 +16,7 @@ from app.api.premium import PremiumAPI
 from app.core.config import settings
 from app.tasks.employees import fill_birthdays
 from app.tasks.kpi import fill_kpi
-from app.tasks.premium import fill_specialists_premium
+from app.tasks.premium import fill_heads_premium, fill_specialists_premium
 
 
 class Scheduler:
@@ -120,8 +120,7 @@ class Scheduler:
         # Add a health check job
         self.scheduler.add_job(
             self._scheduler_health_check,
-            # trigger=IntervalTrigger(minutes=30),
-            trigger=IntervalTrigger(seconds=3),
+            trigger=IntervalTrigger(minutes=30),
             id="scheduler_health_check",
             name="Health Check",
             replace_existing=True,
@@ -160,6 +159,14 @@ class Scheduler:
             args=[self.premium_api],
             id="premium_specialists",
             name="Заполнение премиума специалистов",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self._safe_job_wrapper(fill_heads_premium, "premium_heads"),
+            trigger=IntervalTrigger(hours=1),
+            args=[self.premium_api],
+            id="premium_heads",
+            name="Заполнение премиума руководителей",
             replace_existing=True,
         )
         self.logger.info("Premium jobs configured")

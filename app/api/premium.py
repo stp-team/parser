@@ -1,7 +1,7 @@
 import logging
 
 from app.api.base import BaseAPI
-from app.models.premium import SpecialistPremiumDataList
+from app.models.premium import HeadPremiumResponse, SpecialistPremiumResponse
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class PremiumAPI(BaseAPI):
         heads_id=None,
         employees_id=None,
         division: str = "НТП1",
-    ) -> SpecialistPremiumDataList | None:
+    ) -> SpecialistPremiumResponse | None:
         if employees_id is None:
             employees_id = []
         if heads_id is None:
@@ -47,10 +47,52 @@ class PremiumAPI(BaseAPI):
 
         try:
             data = await response.json()
-            premium = SpecialistPremiumDataList.from_list(data)
+            premium = SpecialistPremiumResponse.model_validate(data)
             return premium
         except Exception as e:
             logger.error(
                 f"[API] [Premium] Ошибка получения премиума для специалистов: {e}"
+            )
+            return None
+
+    async def get_head_premium(
+        self,
+        period: str,
+        subdivision_id=None,
+        heads_id=None,
+        employees_id=None,
+        division: str = "НТП",
+    ) -> HeadPremiumResponse | None:
+        if employees_id is None:
+            employees_id = []
+        if heads_id is None:
+            heads_id = []
+        if subdivision_id is None:
+            subdivision_id = []
+
+        endpoint = ""
+        match division:
+            case "НТП":
+                endpoint = f"{self.service_url}/ntpo/get-premium-head-month"
+            case "НЦК":
+                endpoint = f"{self.service_url}/ntp-nck/get-premium-head-month"
+
+        response = await self.post(
+            endpoint=endpoint,
+            json={
+                "period": period,
+                "subdivisionId": subdivision_id,
+                "headsId": heads_id,
+                "employeesId": employees_id,
+            },
+        )
+
+        try:
+            data = await response.json()
+            premium = HeadPremiumResponse.model_validate(data)
+            return premium
+        except Exception as e:
+            logger.error(
+                f"[API] [Premium] Ошибка получения премиума для руководителей: {e}"
             )
             return None

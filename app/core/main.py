@@ -59,6 +59,8 @@ async def main():
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
 
+            scheduler.run_job_now("premium_heads")
+
             try:
                 while True:
                     await asyncio.sleep(10)
