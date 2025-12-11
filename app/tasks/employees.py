@@ -1,7 +1,6 @@
 import asyncio
 import logging
 
-from aiohttp import ClientSession
 from stp_database.repo.STP import MainRequestsRepo
 
 from app.api.employees import EmployeesAPI
@@ -30,9 +29,8 @@ async def fetch_employee_data(
         return None, db_employee_name, api_employee_id
 
 
-async def fill_birthdays(session: ClientSession):
-    employees_api = EmployeesAPI(session=session)
-    employees = await employees_api.get_employees(exclude_fired=True)
+async def fill_birthdays(api: EmployeesAPI):
+    employees = await api.get_employees(exclude_fired=True)
     logger.debug(f"[Дни рождений] Найдено {len(employees)} сотрудников в API")
 
     if not employees:
@@ -77,7 +75,7 @@ async def fill_birthdays(session: ClientSession):
         # Получаем данные по найденным сотрудникам
         logger.info("[Дни рождений] Получаем данные из API")
         fetch_tasks = [
-            fetch_employee_data(employees_api, api_emp.id, db_emp.fullname)
+            fetch_employee_data(api, api_emp.id, db_emp.fullname)
             for db_emp, api_emp in employee_pairs
         ]
 

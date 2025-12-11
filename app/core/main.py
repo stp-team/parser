@@ -1,79 +1,87 @@
 import asyncio
 import logging
-import signal
-import sys
 
 from aiohttp import ClientSession
 
+from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
 from app.core.auth import authenticate
 from app.core.config import settings
-from app.core.scheduler import scheduler
 from app.services.logger import setup_logging
-from app.tasks.employees import fill_birthdays
-from app.tasks.kpi import fill_kpi
-from app.tasks.premium import fill_specialists_premium
+from app.services.scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
 
-def signal_handler(sig, frame):
-    """Handle shutdown signals gracefully"""
-    logger.info("Received shutdown signal. Stopping scheduler...")
-    scheduler.shutdown()
-    sys.exit(0)
-
-
 async def main():
     setup_logging()
+    logger.info("Запуск парсера...")
+
+    session = None
 
     try:
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-
+        # Инициализация сессии и авторизация
         session = ClientSession(base_url=settings.OKC_BASE_URL)
         await authenticate(
             username=settings.OKC_USERNAME,
             password=settings.OKC_PASSWORD,
             session=session,
         )
+        logger.info("Успешная авторизация на OKC")
 
-        scheduler.add_job(
-            fill_birthdays,
-            "cron",
-            hour="12",
-            args=[session],
-        )
-
-        premium_api = PremiumAPI(session)
+        # Инициализация API клиентов
+        employees_api = EmployeesAPI(session)
         kpi_api = KpiAPI(session)
+        premium_api = PremiumAPI(session)
 
-        await fill_kpi(kpi_api)
-        await fill_specialists_premium(premium_api)
+        db_url = None
+        if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
+            db_url = settings.SCHEDULER_JOB_STORE_URL
+            logger.info(f"Scheduler persistence enabled with DB: {db_url}")
 
-        # await fill_kpi(session)
-        scheduler.add_job(
-            fill_specialists_premium,
-            "interval",
-            hours=12,
-            args=[premium_api],
+        # Инициализация планировщика
+        scheduler = Scheduler(
+            employees_api=employees_api,
+            kpi_api=kpi_api,
+            premium_api=premium_api,
+            db_url=db_url,
+            max_workers=settings.SCHEDULER_MAX_WORKERS,
         )
-        scheduler.start()
 
-        # Keep the program running
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received. Shutting down...")
-            scheduler.shutdown()
+        async with scheduler.managed_lifecycle():
+            logger.info("Планировщик запущен")
+
+            status = scheduler.get_job_status()
+            logger.info(f"Запланированные задачи: {len(status['jobs'])}")
+            for job in status["jobs"]:
+                logger.info(
+                    f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
+                )
+
+            try:
+                while True:
+                    await asyncio.sleep(10)
+
+                    if logger.isEnabledFor(logging.DEBUG):
+                        status = scheduler.get_job_status()
+                        logger.debug(f"Scheduler stats: {status['stats']}")
+
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received. Shutting down gracefully...")
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}")
+                raise
 
     except Exception as e:
-        logger.error(f"Error in main: {e}")
-        if scheduler.running:
-            scheduler.shutdown()
+        logger.error(f"Error in main: {e}", exc_info=True)
         raise
+
+    finally:
+        # Очистка ресурсов
+        if session:
+            await session.close()
+            logger.info("HTTP session closed")
 
 
 if __name__ == "__main__":
