@@ -13,6 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
+from app.core.config import settings
 from app.tasks.employees import fill_birthdays
 from app.tasks.kpi import fill_kpi
 from app.tasks.premium import fill_specialists_premium
@@ -57,7 +58,7 @@ class Scheduler:
         self.scheduler = AsyncIOScheduler(
             jobstores=jobstores,
             job_defaults=job_defaults,
-            timezone="Asia/Yekaterinburg",
+            timezone=settings.SCHEDULER_TIMEZONE,
         )
 
         self.scheduler.add_listener(self._job_executed, EVENT_JOB_EXECUTED)
