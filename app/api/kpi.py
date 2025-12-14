@@ -10,8 +10,10 @@ from app.models.kpi import (
     GenericKPIDataRecord,
     KPIDataRecord,
     KPIResponse,
+    PaidServiceRecord,
     POKDataRecord,
     SalesDataRecord,
+    SalesPotentialDataRecord,
     TypedKPIResponse,
 )
 from app.services.constants import time_format
@@ -32,7 +34,9 @@ class KpiAPI(BaseAPI):
             "CSI": 12,  # С правками - 12, без - 33
             "POK": 8,  # С правками - 8, без - 34
             "DELAY": 39,  # Используется нерабочее время
-            "Sales": 0,
+            "Sales": 61,
+            "SalesPotential": 69,
+            "PaidService": 62,
         },
         "НТП2": {
             "AHT": 16,
@@ -40,7 +44,9 @@ class KpiAPI(BaseAPI):
             "CSI": 12,  # С правками - 12, без - 33
             "POK": 8,  # С правками - 8, без - 34
             "DELAY": 39,  # Используется нерабочее время
-            "Sales": 0,
+            "Sales": 61,
+            "SalesPotential": 69,
+            "PaidService": 64,
         },
         "НЦК": {
             "AHT": 11,
@@ -48,7 +54,9 @@ class KpiAPI(BaseAPI):
             "CSI": 10,  # С правками - 10, без - 32
             "POK": 9,
             "DELAY": 54,  # Используется время доработки
-            "Sales": 0,
+            "Sales": 68,
+            "SalesPotential": 87,
+            "PaidService": 86,
         },
     }
 
@@ -65,6 +73,8 @@ class KpiAPI(BaseAPI):
             "POK": POKDataRecord,
             "DELAY": DelayDataRecord,
             "Sales": SalesDataRecord,
+            "SalesPotential": SalesPotentialDataRecord,
+            "PaidService": PaidServiceRecord,
         }
         return report_models.get(report_type, GenericKPIDataRecord)
 

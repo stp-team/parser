@@ -55,15 +55,13 @@ async def authenticate(username: str, password: str, session: ClientSession) -> 
     Args:
         username: Имя пользователя OKC
         password: Пароль пользователя OKC
+        session: Сессия для авторизации
 
     Returns:
         Авторизованная сессия при успешном входе, иначе None
     """
-
-    # Get CSRF token and session with cookies
     csrf_token = await get_csrf(session=session)
 
-    # Set Content-Type for POST request
     session.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
     session.headers.update({"Referer": settings.OKC_BASE_URL + "/site/login"})
 

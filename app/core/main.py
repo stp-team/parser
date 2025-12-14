@@ -59,9 +59,6 @@ async def main():
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
 
-            # await fill_all_premium_last_6_months(premium_api)
-            scheduler.run_job_now("premium_specialists")
-            scheduler.run_job_now("premium_heads")
             try:
                 while True:
                     await asyncio.sleep(10)

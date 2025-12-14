@@ -12,7 +12,8 @@ from stp_database.models.KPI import HeadPremium, SpecPremium
 
 from app.api.premium import PremiumAPI
 from app.core.db import get_stats_session
-from app.services.constants import time_format, unites
+from app.services.constants import unites
+from app.services.helpers import get_current_month_first_day
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +41,6 @@ class APIResponse(Protocol):
     """Protocol for API response objects."""
 
     def __getattr__(self, name: str) -> Any: ...
-
-
-def get_current_month_first_day() -> str:
-    """Возвращает первое число текущего месяца в формате "dd.mm.yyyy".
-
-    Returns:
-        Строка с датой первого числа текущего месяца (например, "01.12.2025")
-    """
-    current_date = datetime.now()
-    first_day = current_date.replace(day=1)
-    return first_day.strftime(time_format)
 
 
 def generate_last_6_months_periods() -> list[str]:
