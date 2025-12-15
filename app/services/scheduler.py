@@ -13,6 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
+from app.api.tutors import TutorsAPI
 from app.core.config import settings
 from app.tasks.employees import (
     fill_birthdays,
@@ -21,6 +22,7 @@ from app.tasks.employees import (
 )
 from app.tasks.kpi import fill_day_kpi, fill_kpi, fill_month_kpi, fill_week_kpi
 from app.tasks.premium import fill_heads_premium, fill_specialists_premium
+from app.tasks.tutors.tutors import fill_tutor_schedule
 
 
 class Scheduler:
@@ -29,6 +31,7 @@ class Scheduler:
         employees_api: EmployeesAPI,
         kpi_api: KpiAPI,
         premium_api: PremiumAPI,
+        tutors_api: TutorsAPI,
         db_url: str | None = None,
         max_workers: int = 5,
     ):
@@ -38,6 +41,7 @@ class Scheduler:
             employees_api: Экземпляр API сотрудников
             kpi_api: Экземпляр API KPI
             premium_api: Экземпляр API премиума
+            tutors_api: Экземпляр API наставников
             db_url: URL на БД (опционально, для сохранения задач)
             max_workers: Максимальное количество одновременных задач
         """
@@ -45,6 +49,7 @@ class Scheduler:
         self.employees_api = employees_api
         self.kpi_api = kpi_api
         self.premium_api = premium_api
+        self.tutors_api = tutors_api
         self.max_workers = max_workers
         self._is_running = False
         self._shutdown_event = asyncio.Event()
@@ -120,6 +125,7 @@ class Scheduler:
         await self._setup_employees()
         await self._setup_kpi()
         await self._setup_premium()
+        await self._setup_tutors()
 
         self.scheduler.add_job(
             self._scheduler_health_check,
@@ -219,6 +225,35 @@ class Scheduler:
             replace_existing=True,
         )
         self.logger.info("[Планировщик] Задачи премиума настроены")
+
+    async def _setup_tutors(self) -> None:
+        """Настройка задач, связанных с расписанием наставников."""
+        # Инкрементальное обновление каждые 5 минут (только последние 2 месяца)
+        self.scheduler.add_job(
+            self._safe_job_wrapper(
+                lambda api: fill_tutor_schedule(api, full_update=False),
+                "tutors_incremental",
+            ),
+            trigger=IntervalTrigger(minutes=5),
+            args=[self.tutors_api],
+            id="tutors_incremental",
+            name="Обновление расписания наставников (2 месяца)",
+            replace_existing=True,
+        )
+
+        # Полное обновление раз в день в 3:00 утра (все 6 месяцев)
+        self.scheduler.add_job(
+            self._safe_job_wrapper(
+                lambda api: fill_tutor_schedule(api, full_update=True), "tutors_full"
+            ),
+            trigger=CronTrigger(hour=3, minute=0),
+            args=[self.tutors_api],
+            id="tutors_full",
+            name="Полное обновление расписания наставников (6 месяцев)",
+            replace_existing=True,
+        )
+
+        self.logger.info("[Планировщик] Задачи наставников настроены")
 
     def _safe_job_wrapper(self, job_func, job_name: str):
         """Обертка для задач."""
