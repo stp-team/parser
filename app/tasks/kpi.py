@@ -12,15 +12,23 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from stp_database.models.KPI import SpecDayKPI, SpecMonthKPI, SpecWeekKPI
+from stp_database.models.Stats import SpecDayKPI, SpecMonthKPI, SpecWeekKPI
 
 from app.api.kpi import KpiAPI
 from app.core.db import get_stats_session
-from app.services.helpers import get_current_month_first_day
+from app.services.helpers import (
+    calculate_days_in_month_period,
+    calculate_days_in_week_period,
+    get_current_month_first_day,
+    get_month_period_for_kpi,
+    get_week_start_date,
+    get_yesterday_date,
+)
 from app.tasks.base import (
     APIProcessor,
     BatchDBOperator,
@@ -42,9 +50,13 @@ class KPIProcessingConfig:
     divisions: list[str]
     report_types: list[str]
     db_model_class: type[DBModel]
-    period_days: int
+    period_days: int | None  # None означает использование кастомных дат
     table_name: str
     delete_func: Callable[[AsyncSession], Any]
+    start_date_func: Callable[[], 'datetime'] | None = None  # Функция для получения начальной даты
+    extraction_period_func: Callable[[], 'datetime'] | None = None  # Функция для получения extraction_period
+    use_custom_dates: bool = False  # Флаг использования кастомных дат
+    use_week_period: bool = False  # Флаг для недельного периода
     semaphore_limit: int = 10
 
     def get_delete_func(self):
@@ -238,9 +250,20 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
 
         async def fetch_kpi_for_division_and_report(division, report_type):
             try:
-                result = await self.api.get_period_kpi(
-                    division=division, report=report_type, days=config.period_days
-                )
+                if config.use_custom_dates and config.start_date_func:
+                    # Используем кастомные даты
+                    start_date = config.start_date_func()
+                    result = await self.api.get_custom_period_kpi(
+                        division=division,
+                        report=report_type,
+                        start_date=start_date,
+                        use_week_period=config.use_week_period
+                    )
+                else:
+                    # Используем старую логику с количеством дней
+                    result = await self.api.get_period_kpi(
+                        division=division, report=report_type, days=config.period_days
+                    )
                 return division, report_type, result
             except Exception as e:
                 self.logger.error(
@@ -274,9 +297,19 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
             f"Результатов с данными: {len(results_with_data)} из {len(results)}"
         )
 
+        # Определяем extraction_period в зависимости от типа конфигурации
+        extraction_period = None
+        if config.extraction_period_func:
+            # Используем специальную функцию для extraction_period
+            extraction_period = config.extraction_period_func()
+        elif config.use_custom_dates and config.start_date_func:
+            extraction_period = config.start_date_func()
+        else:
+            extraction_period = get_current_month_first_day()
+
         # Агрегируем данные по сотрудникам
         aggregator = KPIDataAggregator(config.db_model_class)
-        return aggregator.aggregate_results(results)
+        return aggregator.aggregate_results(results, extraction_period)
 
     async def save_data(
         self, data: list[DBModel], config: KPIProcessingConfig, **kwargs
@@ -325,9 +358,11 @@ DAY_KPI_CONFIG = KPIProcessingConfig(
         "PaidService",
     ],
     db_model_class=SpecDayKPI,
-    period_days=1,
+    period_days=1,  # Сохраняем старую логику для дневных
     table_name="KpiDay",
     delete_func=KPIDBManager.delete_old_day_data,
+    extraction_period_func=get_yesterday_date,  # Используем вчерашний день
+    use_custom_dates=False,
 )
 
 WEEK_KPI_CONFIG = KPIProcessingConfig(
@@ -344,9 +379,12 @@ WEEK_KPI_CONFIG = KPIProcessingConfig(
         "PaidService",
     ],
     db_model_class=SpecWeekKPI,
-    period_days=7,
+    period_days=None,  # Используем кастомные даты
     table_name="KpiWeek",
     delete_func=KPIDBManager.delete_old_week_data,
+    start_date_func=get_week_start_date,
+    use_custom_dates=True,
+    use_week_period=True,  # Используем недельный период
 )
 
 MONTH_KPI_CONFIG = KPIProcessingConfig(
@@ -363,9 +401,11 @@ MONTH_KPI_CONFIG = KPIProcessingConfig(
         "PaidService",
     ],
     db_model_class=SpecMonthKPI,
-    period_days=31,
+    period_days=None,  # Используем кастомные даты
     table_name="KpiMonth",
     delete_func=KPIDBManager.delete_old_month_data,
+    start_date_func=get_month_period_for_kpi,
+    use_custom_dates=True,
 )
 
 

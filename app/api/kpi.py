@@ -201,6 +201,49 @@ class KpiAPI(BaseAPI):
         )
         return self._parse_response(kpi_data, report)
 
+    async def get_custom_period_kpi(
+        self,
+        division: str,
+        report: str,
+        start_date: datetime,
+        end_date: datetime | None = None,
+        use_week_period: bool = False
+    ) -> TypedKPIResponse | None:
+        """Получает KPI за кастомный период.
+
+        Args:
+            division: Направление специалиста
+            report: Тип отчета
+            start_date: Дата начала периода
+            end_date: Дата окончания периода (если None, то текущая дата)
+            use_week_period: Если True, использует конец текущей недели как end_date
+
+        Returns:
+            Типизированный отчет
+        """
+        if end_date is None:
+            if use_week_period:
+                # Для недельных данных используем конец недели
+                from app.services.helpers import get_week_end_date
+                end_date = get_week_end_date()
+            else:
+                end_date = datetime.now()
+
+        # Get units and report ID from class attributes
+        units = self.unites.get(division)
+        report_id = self.reports.get(division, {}).get(report)
+
+        if not units or not report_id:
+            return None
+
+        kpi_data = await self.get_report(
+            units=units,
+            start_date=start_date.strftime(time_format),
+            stop_date=end_date.strftime(time_format),
+            report=report_id,
+        )
+        return self._parse_response(kpi_data, report)
+
     async def get_day_kpi(self, division: str, report: str) -> TypedKPIResponse | None:
         """Получает показатели за последний день.
 

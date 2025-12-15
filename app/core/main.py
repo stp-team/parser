@@ -6,10 +6,14 @@ from aiohttp import ClientSession
 from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
+from app.api.sl import SlAPI
 from app.core.auth import authenticate
 from app.core.config import settings
 from app.services.logger import setup_logging
 from app.services.scheduler import Scheduler
+from app.tasks.employees import fill_employees
+from app.tasks.kpi import fill_kpi
+from app.tasks.premium import fill_heads_premium, fill_specialists_premium
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,7 @@ async def main():
         employees_api = EmployeesAPI(session)
         kpi_api = KpiAPI(session)
         premium_api = PremiumAPI(session)
+        sl_api = SlAPI(session)
 
         db_url = None
         if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
@@ -58,6 +63,15 @@ async def main():
                 logger.info(
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
+
+            # Заполнение данных при старте
+            logger.info("Запуск получения данных при старте парсера...")
+            await fill_employees(employees_api)
+            await fill_kpi(kpi_api)
+            await fill_heads_premium(premium_api)
+            await fill_specialists_premium(premium_api)
+            # await fill_sl(sl_api)
+            logger.info("Получение данных при старте завершено")
 
             try:
                 while True:

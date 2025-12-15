@@ -448,19 +448,8 @@ async def fill_employment_dates(api: EmployeesAPI) -> list[Any]:
     )
 
 
-@log_processing_time("заполнение employee_id")
-async def fill_employee_ids(api: EmployeesAPI) -> list[Any]:
-    """Заполняет employee_id сотрудников."""
-    return await _process_employees_with_config(
-        api,
-        EMPLOYEE_ID_CONFIG,
-        filter_missing_employee_id,
-        EmployeeDataExtractor.extract_employee_id_data,
-    )
-
-
 @log_processing_time("быстрое заполнение employee_id")
-async def fill_employee_ids_fast(api: EmployeesAPI) -> list[Any]:
+async def fill_employee_ids(api: EmployeesAPI) -> list[Any]:
     """Быстро заполняет employee_id сотрудников из основного списка API."""
     return await _process_employees_with_config(
         api, EMPLOYEE_ID_FAST_CONFIG, filter_missing_employee_id
@@ -490,7 +479,7 @@ async def fill_employees(api: EmployeesAPI) -> list[Any]:
     """
     try:
         # Быстро заполняем employee_id
-        employees = await fill_employee_ids_fast(api)
+        employees = await fill_employee_ids(api)
 
         # Параллельно заполняем остальные данные
         await asyncio.gather(

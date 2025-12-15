@@ -7,14 +7,19 @@ from typing import Any
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
 from app.core.config import settings
-from app.tasks.employees import fill_birthdays, fill_employment_dates
-from app.tasks.kpi import fill_kpi
+from app.tasks.employees import (
+    fill_birthdays,
+    fill_employee_ids,
+    fill_employment_dates,
+)
+from app.tasks.kpi import fill_day_kpi, fill_kpi, fill_month_kpi, fill_week_kpi
 from app.tasks.premium import fill_heads_premium, fill_specialists_premium
 
 
@@ -127,7 +132,7 @@ class Scheduler:
     async def _setup_employees(self) -> None:
         """Настройка задач, связанных с сотрудниками."""
         self.scheduler.add_job(
-            self._safe_job_wrapper(fill_birthdays, "employees_ids"),
+            self._safe_job_wrapper(fill_employee_ids, "employees_ids"),
             trigger=IntervalTrigger(hours=2),
             args=[self.employees_api],
             id="employees_ids",
@@ -163,6 +168,33 @@ class Scheduler:
             args=[self.kpi_api],
             id="fill_kpi",
             name="Заполнение показателей KPI",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self._safe_job_wrapper(fill_day_kpi, "fill_day_kpi"),
+            trigger=CronTrigger(hour=10, minute=0),
+            args=[self.kpi_api],
+            id="fill_day_kpi",
+            name="Заполнение дневных показателей KPI",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self._safe_job_wrapper(fill_week_kpi, "fill_week_kpi"),
+            trigger=CronTrigger(day_of_week='mon', hour=10, minute=0),
+            args=[self.kpi_api],
+            id="fill_week_kpi",
+            name="Заполнение недельных показателей KPI",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self._safe_job_wrapper(fill_month_kpi, "fill_month_kpi"),
+            trigger=CronTrigger(day=4, hour=10, minute=0),
+            args=[self.kpi_api],
+            id="fill_month_kpi",
+            name="Заполнение месячных показателей KPI",
             replace_existing=True,
         )
 

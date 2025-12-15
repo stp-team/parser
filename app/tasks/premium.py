@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from stp_database.models.KPI import HeadPremium, SpecPremium
+from stp_database.models.Stats import HeadPremium, SpecPremium
 
 from app.api.premium import PremiumAPI
 from app.core.db import get_stats_session
