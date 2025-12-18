@@ -20,7 +20,7 @@ from app.tasks.employees.employees import (
     fill_employee_ids,
     fill_employment_dates,
 )
-from app.tasks.kpi.kpi import fill_day_kpi, fill_kpi, fill_month_kpi, fill_week_kpi
+from app.tasks.kpi.kpi import fill_day_kpi, fill_month_kpi, fill_week_kpi
 from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
 from app.tasks.tutors.tutors import fill_tutor_schedule
 
@@ -168,15 +168,6 @@ class Scheduler:
 
     async def _setup_kpi(self) -> None:
         """Настройка задач, связанных с показателями KPI."""
-        self.scheduler.add_job(
-            self._safe_job_wrapper(fill_kpi, "fill_kpi"),
-            trigger=IntervalTrigger(hours=1),
-            args=[self.kpi_api],
-            id="fill_kpi",
-            name="Заполнение показателей KPI",
-            replace_existing=True,
-        )
-
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_day_kpi, "fill_day_kpi"),
             trigger=CronTrigger(hour=10, minute=0),
