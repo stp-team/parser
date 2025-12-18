@@ -12,9 +12,9 @@ from app.core.auth import authenticate
 from app.core.config import settings
 from app.services.logger import setup_logging
 from app.services.scheduler import Scheduler
-from app.tasks.premium.premium import (
-    fill_heads_premium,
-    fill_specialists_premium,
+from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
+from app.tasks.tutors.tutors import (
+    fill_tutor_schedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,8 @@ async def main():
             # await fill_kpi(kpi_api)
             await fill_heads_premium(premium_api)
             await fill_specialists_premium(premium_api)
-            # await fill_all_premium_last_6_months(premium_api)
             # await fill_sl(sl_api)
-            # await fill_tutor_schedule(tutors_api, False)
+            await fill_tutor_schedule(tutors_api)
             logger.info("Получение данных при старте завершено")
 
             try:

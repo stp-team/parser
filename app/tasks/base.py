@@ -594,7 +594,7 @@ class PeriodHelper:
     """
 
     @staticmethod
-    def _add_months(date: datetime, months: int) -> datetime:
+    def add_months(date: datetime, months: int) -> datetime:
         """Добавляет месяцы к дате, используя только стандартную библиотеку."""
         year = date.year
         month = date.month + months
@@ -670,7 +670,7 @@ class PeriodHelper:
             current = start_dt
             while current <= end_dt:
                 periods.append(current.strftime("%Y-%m"))
-                current = PeriodHelper._add_months(current, 1)
+                current = PeriodHelper.add_months(current, 1)
 
         elif format_type == "YYYY-MM-DD":
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -708,7 +708,7 @@ class PeriodHelper:
         periods = []
 
         for i in range(months_count, 0, -1):
-            target_date = PeriodHelper._add_months(base_date, -i)
+            target_date = PeriodHelper.add_months(base_date, -i)
             periods.append(target_date.strftime("%Y-%m"))
 
         return periods
@@ -747,7 +747,7 @@ class PeriodHelper:
             end_offset = 0
 
         for i in range(start_offset, end_offset, -1):
-            target_date = PeriodHelper._add_months(base_date, -i)
+            target_date = PeriodHelper.add_months(base_date, -i)
             periods.append(target_date.strftime("%Y-%m"))
 
         return periods
