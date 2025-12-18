@@ -32,6 +32,9 @@ from app.tasks.base import (
     BatchDBOperator,
     ConcurrentAPIFetcher,
     log_processing_time,
+    safe_get_attr,
+    validate_and_extract_data,
+    validate_api_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,25 +95,22 @@ class KPIDataAggregator:
         kpi_objects_by_fullname = {}
         total_processed_rows = 0
 
+        # Используем новую утилиту для валидации и извлечения данных
+        valid_results = validate_and_extract_data(
+            results,
+            lambda r: validate_api_result(r, "data"),
+            "агрегация KPI",
+        )
+
         try:
-            for result in results:
-                if isinstance(result, Exception):
-                    continue
-
-                division, report_type, api_result = result[1]
-
-                if (
-                    not api_result
-                    or not hasattr(api_result, "data")
-                    or not api_result.data
-                ):
-                    self.logger.warning(
-                        f"Не найдено показателей для направления: {division}, отчет: {report_type}"
-                    )
-                    continue
+            for result_tuple, api_result in valid_results:
+                _division, report_type = (
+                    result_tuple[0],
+                    result_tuple[1] if len(result_tuple) > 1 else "unknown",
+                )
 
                 for row in api_result.data:
-                    fullname = getattr(row, "fullname", None)
+                    fullname = safe_get_attr(row, "fullname")
                     if not fullname:
                         continue
 
@@ -136,19 +136,26 @@ class KPIDataAggregator:
         return list(kpi_objects_by_fullname.values())
 
     def _update_kpi_object(self, kpi_obj: DBModel, row: Any, report_type: str) -> None:
-        """Обновляет объект KPI данными из строки API в зависимости от типа отчета."""
+        """
+        Обновляет объект KPI данными из строки API в зависимости от типа отчета.
+        Оптимизированная версия с использованием safe_get_attr.
+        """
         report_type_lower = report_type.lower()
 
-        if report_type_lower == "aht" and hasattr(row, "aht") and row.aht:
+        if report_type_lower == "aht" and safe_get_attr(row, "aht"):
             self._update_aht_metrics(kpi_obj, row)
-        elif report_type_lower == "flr" and hasattr(row, "flr") and row.flr:
+        elif report_type_lower == "flr" and safe_get_attr(row, "flr"):
             self._update_flr_metrics(kpi_obj, row)
-        elif report_type_lower == "csi" and hasattr(row, "csi") and row.csi:
-            kpi_obj.csi = row.csi
-        elif report_type_lower == "pok" and hasattr(row, "pok") and row.pok:
+        elif report_type_lower == "csi":
+            csi_value = safe_get_attr(row, "csi")
+            if csi_value:
+                kpi_obj.csi = csi_value
+        elif report_type_lower == "pok" and safe_get_attr(row, "pok"):
             self._update_pok_metrics(kpi_obj, row)
-        elif report_type_lower == "delay" and hasattr(row, "delay") and row.delay:
-            kpi_obj.delay = row.delay
+        elif report_type_lower == "delay":
+            delay_value = safe_get_attr(row, "delay")
+            if delay_value:
+                kpi_obj.delay = delay_value
         elif report_type_lower == "sales":
             self._update_sales_metrics(kpi_obj, row)
         elif report_type_lower == "salespotential":
@@ -157,54 +164,54 @@ class KPIDataAggregator:
             self._update_paid_service_metrics(kpi_obj, row)
 
     def _update_aht_metrics(self, kpi_obj: DBModel, row: Any) -> None:
-        """Обновляет метрики AHT."""
-        kpi_obj.contacts_count = getattr(row, "aht_total_contacts", None)
-        kpi_obj.aht = row.aht
-        kpi_obj.aht_chats_web = getattr(row, "aht_chats_web", None)
-        kpi_obj.aht_chats_dhcp = getattr(row, "aht_chats_dhcp", None)
-        kpi_obj.aht_chats_mobile = getattr(row, "aht_chats_mobile", None)
-        kpi_obj.aht_chats_smartdom = getattr(row, "aht_chats_smartdom", None)
+        """Обновляет метрики AHT с использованием safe_get_attr."""
+        kpi_obj.contacts_count = safe_get_attr(row, "aht_total_contacts")
+        kpi_obj.aht = safe_get_attr(row, "aht")
+        kpi_obj.aht_chats_web = safe_get_attr(row, "aht_chats_web")
+        kpi_obj.aht_chats_dhcp = safe_get_attr(row, "aht_chats_dhcp")
+        kpi_obj.aht_chats_mobile = safe_get_attr(row, "aht_chats_mobile")
+        kpi_obj.aht_chats_smartdom = safe_get_attr(row, "aht_chats_smartdom")
 
     def _update_flr_metrics(self, kpi_obj: DBModel, row: Any) -> None:
-        """Обновляет метрики FLR."""
-        kpi_obj.flr = row.flr
-        kpi_obj.flr_services = getattr(row, "flr_services", None)
-        kpi_obj.flr_services_cross = getattr(row, "flr_services_cross", None)
-        kpi_obj.flr_services_transfer = getattr(row, "flr_services_transfers", None)
+        """Обновляет метрики FLR с использованием safe_get_attr."""
+        kpi_obj.flr = safe_get_attr(row, "flr")
+        kpi_obj.flr_services = safe_get_attr(row, "flr_services")
+        kpi_obj.flr_services_cross = safe_get_attr(row, "flr_services_cross")
+        kpi_obj.flr_services_transfer = safe_get_attr(row, "flr_services_transfers")
 
     def _update_pok_metrics(self, kpi_obj: DBModel, row: Any) -> None:
-        """Обновляет метрики POK."""
-        kpi_obj.pok = row.pok
-        kpi_obj.pok_rated_contacts = getattr(row, "pok_rated_contacts", None)
+        """Обновляет метрики POK с использованием safe_get_attr."""
+        kpi_obj.pok = safe_get_attr(row, "pok")
+        kpi_obj.pok_rated_contacts = safe_get_attr(row, "pok_rated_contacts")
 
     def _update_sales_metrics(self, kpi_obj: DBModel, row: Any) -> None:
         """Обновляет метрики продаж."""
-        kpi_obj.sales = getattr(row, "sales", None)
-        kpi_obj.sales_videos = getattr(row, "sales_videos", None)
-        kpi_obj.sales_routers = getattr(row, "sales_routers", None)
-        kpi_obj.sales_tvs = getattr(row, "sales_tvs", None)
-        kpi_obj.sales_intercoms = getattr(row, "sales_intercoms", None)
-        kpi_obj.sales_conversion = getattr(row, "sales_conversion", None)
+        kpi_obj.sales = safe_get_attr(row, "sales")
+        kpi_obj.sales_videos = safe_get_attr(row, "sales_videos")
+        kpi_obj.sales_routers = safe_get_attr(row, "sales_routers")
+        kpi_obj.sales_tvs = safe_get_attr(row, "sales_tvs")
+        kpi_obj.sales_intercoms = safe_get_attr(row, "sales_intercoms")
+        kpi_obj.sales_conversion = safe_get_attr(row, "sales_conversion")
 
     def _update_sales_potential_metrics(self, kpi_obj: DBModel, row: Any) -> None:
         """Обновляет метрики потенциала продаж."""
-        kpi_obj.sales_potential = getattr(row, "sales_potential", None)
-        kpi_obj.sales_potential_video = getattr(row, "sales_potential_video", None)
-        kpi_obj.sales_potential_routers = getattr(row, "sales_potential_routers", None)
-        kpi_obj.sales_potential_tvs = getattr(row, "sales_potential_tvs", None)
-        kpi_obj.sales_potential_intercoms = getattr(
-            row, "sales_potential_intercoms", None
+        kpi_obj.sales_potential = safe_get_attr(row, "sales_potential")
+        kpi_obj.sales_potential_video = safe_get_attr(row, "sales_potential_video")
+        kpi_obj.sales_potential_routers = safe_get_attr(row, "sales_potential_routers")
+        kpi_obj.sales_potential_tvs = safe_get_attr(row, "sales_potential_tvs")
+        kpi_obj.sales_potential_intercoms = safe_get_attr(
+            row, "sales_potential_intercoms"
         )
-        kpi_obj.sales_potential_conversion = getattr(
-            row, "sales_potential_conversion", None
+        kpi_obj.sales_potential_conversion = safe_get_attr(
+            row, "sales_potential_conversion"
         )
 
     def _update_paid_service_metrics(self, kpi_obj: DBModel, row: Any) -> None:
         """Обновляет метрики платных услуг."""
-        kpi_obj.services = getattr(row, "services", None)
-        kpi_obj.services_remote = getattr(row, "services_remote", None)
-        kpi_obj.services_onsite = getattr(row, "services_onsite", None)
-        kpi_obj.services_conversion = getattr(row, "services_conversion", None)
+        kpi_obj.services = safe_get_attr(row, "services")
+        kpi_obj.services_remote = safe_get_attr(row, "services_remote")
+        kpi_obj.services_onsite = safe_get_attr(row, "services_onsite")
+        kpi_obj.services_conversion = safe_get_attr(row, "services_conversion")
 
 
 class KPIDBManager:
@@ -266,12 +273,12 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
                     result = await self.api.get_period_kpi(
                         division=division, report=report_type, days=config.period_days
                     )
-                return division, report_type, result
+                return result
             except Exception as e:
                 self.logger.error(
                     f"Ошибка получения KPI для {division}, отчет {report_type}: {e}"
                 )
-                return division, report_type, None
+                return None
 
         return await self.fetcher.fetch_parallel(
             tasks, fetch_kpi_for_division_and_report
@@ -291,16 +298,15 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
             for r in results
             if not isinstance(r, Exception)
             and len(r) > 1
-            and r[1][2]
-            and hasattr(r[1][2], "data")
-            and r[1][2].data
+            and r[1]
+            and hasattr(r[1], "data")
+            and r[1].data
         ]
         self.logger.debug(
             f"Результатов с данными: {len(results_with_data)} из {len(results)}"
         )
 
         # Определяем extraction_period в зависимости от типа конфигурации
-        extraction_period = None
         if config.extraction_period_func:
             # Используем специальную функцию для extraction_period
             extraction_period = config.extraction_period_func()
@@ -345,70 +351,81 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
             raise
 
 
-# Конфигурации для разных периодов KPI
-DAY_KPI_CONFIG = KPIProcessingConfig(
-    update_type="Дневные KPI",
-    divisions=list(KpiAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
-    report_types=[
-        "AHT",
-        "FLR",
-        "CSI",
-        "POK",
-        "DELAY",
-        "Sales",
-        "SalesPotential",
-        "PaidService",
-    ],
-    db_model_class=SpecDayKPI,
-    period_days=1,  # Сохраняем старую логику для дневных
-    table_name="KpiDay",
-    delete_func=KPIDBManager.delete_old_day_data,
-    extraction_period_func=get_yesterday_date,  # Используем вчерашний день
-    use_custom_dates=False,
-)
+def create_kpi_config(period_type: str) -> KPIProcessingConfig:
+    """
+    Фабрика конфигураций KPI для устранения дублирования.
 
-WEEK_KPI_CONFIG = KPIProcessingConfig(
-    update_type="Недельные KPI",
-    divisions=list(KpiAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
-    report_types=[
-        "AHT",
-        "FLR",
-        "CSI",
-        "POK",
-        "DELAY",
-        "Sales",
-        "SalesPotential",
-        "PaidService",
-    ],
-    db_model_class=SpecWeekKPI,
-    period_days=None,  # Используем кастомные даты
-    table_name="KpiWeek",
-    delete_func=KPIDBManager.delete_old_week_data,
-    start_date_func=get_week_start_date,
-    use_custom_dates=True,
-    use_week_period=True,  # Используем недельный период
-)
+    Args:
+        period_type: Тип периода ("day", "week", "month")
 
-MONTH_KPI_CONFIG = KPIProcessingConfig(
-    update_type="Месячные KPI",
-    divisions=list(KpiAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
-    report_types=[
-        "AHT",
-        "FLR",
-        "CSI",
-        "POK",
-        "DELAY",
-        "Sales",
-        "SalesPotential",
-        "PaidService",
-    ],
-    db_model_class=SpecMonthKPI,
-    period_days=None,  # Используем кастомные даты
-    table_name="KpiMonth",
-    delete_func=KPIDBManager.delete_old_month_data,
-    start_date_func=get_month_period_for_kpi,
-    use_custom_dates=True,
-)
+    Returns:
+        Настроенная конфигурация KPI
+
+    Examples:
+        >>> day_config = create_kpi_config("day")
+        >>> week_config = create_kpi_config("week")
+    """
+    # Общие параметры для всех типов KPI
+    base_config = {
+        "divisions": list(KpiAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
+        "report_types": [
+            "AHT",
+            "FLR",
+            "CSI",
+            "POK",
+            "DELAY",
+            "Sales",
+            "SalesPotential",
+            "PaidService",
+        ],
+        "semaphore_limit": 10,
+    }
+
+    # Специфичные параметры для каждого типа периода
+    config_map = {
+        "day": {
+            "update_type": "Дневные KPI",
+            "db_model_class": SpecDayKPI,
+            "period_days": 1,
+            "table_name": "KpiDay",
+            "delete_func": KPIDBManager.delete_old_day_data,
+            "extraction_period_func": get_yesterday_date,
+            "use_custom_dates": False,
+        },
+        "week": {
+            "update_type": "Недельные KPI",
+            "db_model_class": SpecWeekKPI,
+            "period_days": None,
+            "table_name": "KpiWeek",
+            "delete_func": KPIDBManager.delete_old_week_data,
+            "start_date_func": get_week_start_date,
+            "use_custom_dates": True,
+            "use_week_period": True,
+        },
+        "month": {
+            "update_type": "Месячные KPI",
+            "db_model_class": SpecMonthKPI,
+            "period_days": None,
+            "table_name": "KpiMonth",
+            "delete_func": KPIDBManager.delete_old_month_data,
+            "start_date_func": get_month_period_for_kpi,
+            "use_custom_dates": True,
+        },
+    }
+
+    if period_type not in config_map:
+        raise ValueError(f"Неподдерживаемый тип периода: {period_type}")
+
+    # Объединяем базовые и специфичные параметры
+    config_params = {**base_config, **config_map[period_type]}
+    return KPIProcessingConfig(**config_params)
+
+
+# Константы конфигураций для обратной совместимости
+DAY_KPI_CONFIG = create_kpi_config("day")
+
+WEEK_KPI_CONFIG = create_kpi_config("week")
+MONTH_KPI_CONFIG = create_kpi_config("month")
 
 
 # Публичные функции API

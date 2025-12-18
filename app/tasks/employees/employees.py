@@ -15,6 +15,8 @@ from app.tasks.base import (
     create_lookup_index,
     filter_items,
     log_processing_time,
+    safe_get_attr,
+    validate_api_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,128 +95,147 @@ class EmployeeMatcher:
     def _find_api_employee(
         self, db_employee: Any, api_by_id: dict, api_by_name: dict, stats: dict
     ) -> Any | None:
-        """Находит соответствующего сотрудника API для сотрудника БД."""
+        """
+        Находит соответствующего сотрудника API для сотрудника БД.
+        Оптимизированная версия с использованием validate_api_result и safe_get_attr.
+        """
         # Поиск по employee_id (если есть в БД)
-        if hasattr(db_employee, "employee_id") and db_employee.employee_id:
-            try:
-                employee_id = str(int(db_employee.employee_id))
-                api_employee = api_by_id.get(employee_id)
-                if api_employee:
-                    stats["matched_by_id"] += 1
-                    self.logger.debug(
-                        f"Найден по employee_id {employee_id}: {db_employee.fullname}"
-                    )
-                    return api_employee
-            except (ValueError, TypeError):
-                pass  # employee_id не является числом
+        employee_id = safe_get_attr(db_employee, "employee_id", converter=str)
+        if employee_id:
+            api_employee = api_by_id.get(employee_id)
+            if validate_api_result(api_employee):
+                stats["matched_by_id"] += 1
+                self.logger.debug(
+                    f"Найден по employee_id {employee_id}: {db_employee.fullname}"
+                )
+                return api_employee
 
-        # Поиск по ФИО
-        api_employee = api_by_name.get(db_employee.fullname)
-        if api_employee:
-            stats["matched_by_name"] += 1
-            self.logger.debug(f"Найден по ФИО: {db_employee.fullname}")
-            return api_employee
+        # Поиск по ФИО с безопасным получением атрибута
+        fullname = safe_get_attr(db_employee, "fullname")
+        if fullname:
+            api_employee = api_by_name.get(fullname)
+            if validate_api_result(api_employee):
+                stats["matched_by_name"] += 1
+                self.logger.debug(f"Найден по ФИО: {fullname}")
+                return api_employee
 
         return None
 
 
 class EmployeeDataExtractor:
-    """Извлекатель данных сотрудников для различных типов обновлений."""
+    """
+    Оптимизированный извлекатель данных сотрудников.
+    Использует универсальный подход вместо дублирования методов.
+    """
+
+    # Маппинг полей для разных типов обновлений
+    FIELD_MAPPINGS = {
+        "birthday": ["birthday"],
+        "employment_date": ["employment_date"],
+        "employee_id": ["id"],
+        "all": ["birthday", "employment_date", "id"],
+    }
+
+    @staticmethod
+    def _validate_employee_data(employee_data: Any) -> bool:
+        """Валидирует данные сотрудника с использованием новых утилит."""
+        return validate_api_result(employee_data, "employeeInfo")
+
+    @staticmethod
+    def _create_base_update_data(db_employee: Any) -> EmployeeUpdateData:
+        """Создает базовый объект обновления."""
+        return EmployeeUpdateData(
+            user_id=db_employee.user_id, fullname=db_employee.fullname
+        )
+
+    @staticmethod
+    def extract_data_by_type(
+        employee_data: Any, db_employee: Any, update_type: str
+    ) -> EmployeeUpdateData | None:
+        """
+        Универсальный экстрактор данных по типу обновления.
+        Заменяет все специализированные методы.
+        """
+        if not EmployeeDataExtractor._validate_employee_data(employee_data):
+            return None
+
+        emp_info = employee_data.employeeInfo
+        update_data = EmployeeDataExtractor._create_base_update_data(db_employee)
+
+        # Получаем список полей для данного типа обновления
+        fields_to_extract = EmployeeDataExtractor.FIELD_MAPPINGS.get(update_type, [])
+
+        fields_updated = False
+
+        for field in fields_to_extract:
+            value = safe_get_attr(emp_info, field)
+            if value:
+                if field == "birthday":
+                    update_data.birthday = value
+                    fields_updated = True
+                elif field == "employment_date":
+                    update_data.employment_date = value
+                    fields_updated = True
+                elif field == "id":
+                    update_data.employee_id = safe_get_attr(
+                        emp_info, field, converter=int
+                    )
+                    if update_data.employee_id:
+                        fields_updated = True
+
+        return update_data if fields_updated else None
 
     @staticmethod
     def extract_birthday_data(
         employee_data: Any, db_employee: Any
     ) -> EmployeeUpdateData | None:
         """Извлекает данные дня рождения для обновления."""
-        if (
-            employee_data
-            and hasattr(employee_data, "employeeInfo")
-            and employee_data.employeeInfo.birthday
-        ):
-            return EmployeeUpdateData(
-                user_id=db_employee.user_id,
-                fullname=db_employee.fullname,
-                birthday=employee_data.employeeInfo.birthday,
-            )
-        return None
+        return EmployeeDataExtractor.extract_data_by_type(
+            employee_data, db_employee, "birthday"
+        )
 
     @staticmethod
     def extract_employment_date_data(
         employee_data: Any, db_employee: Any
     ) -> EmployeeUpdateData | None:
         """Извлекает данные даты трудоустройства для обновления."""
-        if (
-            employee_data
-            and hasattr(employee_data, "employeeInfo")
-            and employee_data.employeeInfo.employment_date
-        ):
-            return EmployeeUpdateData(
-                user_id=db_employee.user_id,
-                fullname=db_employee.fullname,
-                employment_date=employee_data.employeeInfo.employment_date,
-            )
-        return None
+        return EmployeeDataExtractor.extract_data_by_type(
+            employee_data, db_employee, "employment_date"
+        )
 
     @staticmethod
     def extract_employee_id_data(
         employee_data: Any, db_employee: Any
     ) -> EmployeeUpdateData | None:
         """Извлекает employee_id для обновления."""
-        if (
-            employee_data
-            and hasattr(employee_data, "employeeInfo")
-            and employee_data.employeeInfo.id
-        ):
-            return EmployeeUpdateData(
-                user_id=db_employee.user_id,
-                fullname=db_employee.fullname,
-                employee_id=int(employee_data.employeeInfo.id),
-            )
-        return None
+        return EmployeeDataExtractor.extract_data_by_type(
+            employee_data, db_employee, "employee_id"
+        )
 
     @staticmethod
     def extract_employee_id_from_list(
         api_employee: Any, db_employee: Any
     ) -> EmployeeUpdateData | None:
         """Извлекает employee_id из списка сотрудников API (без детального запроса)."""
-        if api_employee and api_employee.id:
-            return EmployeeUpdateData(
-                user_id=db_employee.user_id,
-                fullname=db_employee.fullname,
-                employee_id=api_employee.id,
-            )
-        return None
+        if not validate_api_result(api_employee, "id"):
+            return None
+
+        employee_id = safe_get_attr(api_employee, "id", converter=int)
+        if not employee_id:
+            return None
+
+        update_data = EmployeeDataExtractor._create_base_update_data(db_employee)
+        update_data.employee_id = employee_id
+        return update_data
 
     @staticmethod
     def extract_all_data(
         employee_data: Any, db_employee: Any
     ) -> EmployeeUpdateData | None:
         """Извлекает все доступные данные для обновления."""
-        if not employee_data or not hasattr(employee_data, "employeeInfo"):
-            return None
-
-        emp_info = employee_data.employeeInfo
-
-        update_data = EmployeeUpdateData(
-            user_id=db_employee.user_id, fullname=db_employee.fullname
+        return EmployeeDataExtractor.extract_data_by_type(
+            employee_data, db_employee, "all"
         )
-
-        # Заполняем только непустые поля
-        if emp_info.birthday:
-            update_data.birthday = emp_info.birthday
-        if emp_info.id:
-            update_data.employee_id = int(emp_info.id)
-        if emp_info.employment_date:
-            update_data.employment_date = emp_info.employment_date
-
-        # Возвращаем только если есть хотя бы одно поле для обновления
-        if (
-            update_data.birthday
-            or update_data.employee_id
-            or update_data.employment_date
-        ):
-            return update_data
-        return None
 
 
 class EmployeeProcessor(APIProcessor[EmployeeUpdateData, EmployeeProcessingConfig]):
@@ -337,28 +358,41 @@ class EmployeeProcessor(APIProcessor[EmployeeUpdateData, EmployeeProcessingConfi
             )
 
 
-# Конфигурации для различных типов обновлений
-BIRTHDAY_CONFIG = EmployeeProcessingConfig(
-    update_type="Дни рождений", semaphore_limit=10, requires_detailed_api=True
-)
+# =====================================================================================
+# КОНФИГУРАЦИИ
+# =====================================================================================
 
-EMPLOYMENT_DATE_CONFIG = EmployeeProcessingConfig(
-    update_type="Даты трудоустройства", semaphore_limit=10, requires_detailed_api=True
-)
 
-EMPLOYEE_ID_CONFIG = EmployeeProcessingConfig(
-    update_type="Employee ID", semaphore_limit=10, requires_detailed_api=True
-)
+def create_employee_config(
+    update_type: str, fast_mode: bool = False
+) -> EmployeeProcessingConfig:
+    """
+    Фабрика конфигураций сотрудников для устранения дублирования.
 
-EMPLOYEE_ID_FAST_CONFIG = EmployeeProcessingConfig(
-    update_type="Employee ID Fast",
-    semaphore_limit=0,  # Не используется для быстрого режима
-    requires_detailed_api=False,
-)
+    Args:
+        update_type: Тип обновления для логирования
+        fast_mode: Использовать быстрый режим (без детальных API запросов)
 
-FULL_UPDATE_CONFIG = EmployeeProcessingConfig(
-    update_type="Полные данные", semaphore_limit=10, requires_detailed_api=True
-)
+    Returns:
+        Настроенная конфигурация
+
+    Examples:
+        >>> config = create_employee_config("Дни рождений")
+        >>> fast_config = create_employee_config("Employee ID", fast_mode=True)
+    """
+    return EmployeeProcessingConfig(
+        update_type=update_type,
+        semaphore_limit=0 if fast_mode else 10,
+        requires_detailed_api=not fast_mode,
+    )
+
+
+# Константы конфигураций для обратной совместимости
+BIRTHDAY_CONFIG = create_employee_config("Дни рождений")
+EMPLOYMENT_DATE_CONFIG = create_employee_config("Даты трудоустройства")
+EMPLOYEE_ID_CONFIG = create_employee_config("Employee ID")
+EMPLOYEE_ID_FAST_CONFIG = create_employee_config("Employee ID Fast", fast_mode=True)
+FULL_UPDATE_CONFIG = create_employee_config("Полные данные")
 
 
 # Функции фильтрации сотрудников
@@ -478,7 +512,7 @@ async def fill_employees(api: EmployeesAPI) -> list[Any]:
     3. Заполняет даты трудоустройства (требует детальных API запросов)
     """
     try:
-        # Быстро заполняем employee_id
+        # Сначала пробуем заполнить employee_id, чтобы использовать его в следующих запросах
         employees = await fill_employee_ids(api)
 
         # Параллельно заполняем остальные данные

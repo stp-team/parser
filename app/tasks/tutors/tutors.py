@@ -11,34 +11,28 @@ from app.core.db import get_stats_session
 from app.services.helpers import get_current_month_first_day
 from app.tasks.base import (
     APIProcessor,
+    PeriodHelper,
     log_processing_time,
+    safe_get_attr,
+    validate_api_result,
 )
 
 logger = logging.getLogger(__name__)
 
 
+# Date utilities are now handled by PeriodHelper in base.py
+# These functions are kept for compatibility but delegate to PeriodHelper
+period_helper = PeriodHelper()
+
+
 def get_first_day_of_month_ago(months_ago: int) -> datetime:
     """Получает первый день месяца N месяцев назад."""
-    current_date = datetime.now()
-
-    # Вычисляем целевые год и месяц
-    target_month = current_date.month - months_ago
-    target_year = current_date.year
-
-    # Корректируем, если месяц стал отрицательным
-    while target_month <= 0:
-        target_month += 12
-        target_year -= 1
-
-    return datetime(target_year, target_month, 1)
+    return period_helper._add_months(datetime.now(), -months_ago).replace(day=1)
 
 
 def get_first_day_of_next_month(date: datetime) -> datetime:
     """Получает первый день следующего месяца от заданной даты."""
-    if date.month == 12:
-        return datetime(date.year + 1, 1, 1)
-    else:
-        return datetime(date.year, date.month + 1, 1)
+    return period_helper._add_months(date, 1).replace(day=1)
 
 
 @dataclass
@@ -62,20 +56,28 @@ class TutorScheduleProcessingConfig:
             self.picked_shift_types = [1, 2, 4, 3]
 
     def get_delete_func(self):
-        """Возвращает функцию удаления для очистки таблицы."""
+        """Возвращает асинхронную функцию удаления для очистки таблицы."""
         if self.truncate_all:
-            return lambda session: session.execute(delete(TutorsSchedule))
+
+            async def delete_all(session):
+                return await session.execute(delete(TutorsSchedule))
+
+            return delete_all
         else:
             # Удаляем данные за последние 2 месяца (текущий и предыдущий месяц)
             current_month = get_current_month_first_day()
             previous_month = get_first_day_of_month_ago(1)
-            return lambda session: session.execute(
-                delete(TutorsSchedule).where(
-                    TutorsSchedule.extraction_period.in_(
-                        [current_month, previous_month]
+
+            async def delete_recent(session):
+                return await session.execute(
+                    delete(TutorsSchedule).where(
+                        TutorsSchedule.extraction_period.in_(
+                            [current_month, previous_month]
+                        )
                     )
                 )
-            )
+
+            return delete_recent
 
     def get_date_range(self) -> tuple[str, str]:
         """Возвращает диапазон дат для запроса к API."""
@@ -93,57 +95,77 @@ class TutorScheduleDataExtractor:
         """Извлекает данные расписания из результата API."""
         schedule_objects = []
 
-        if not api_result or not hasattr(api_result, "tutors"):
+        # Валидируем API результат
+        if not validate_api_result(api_result, "tutors"):
+            logger.warning("Invalid API result: no tutors data")
             return schedule_objects
 
         for tutor in api_result.tutors:
-            if not hasattr(tutor, "trainees") or not tutor.trainees:
+            # Безопасная проверка наставника и его стажеров
+            trainees = safe_get_attr(tutor, "trainees", [])
+            if not trainees:
                 continue
 
-            for trainee in tutor.trainees:
+            for trainee in trainees:
                 if not trainee or not trainee[0]:
                     continue
 
                 trainee_data = trainee[0]
 
                 # Пропускаем записи без даты смены
-                if not trainee_data.shift_day:
+                shift_day = safe_get_attr(trainee_data, "shift_day")
+                if not shift_day:
+                    employee_id = safe_get_attr(trainee_data, "employee_id", "unknown")
                     logger.warning(
-                        f"Skipping trainee {trainee_data.employee_id} - shift_day is None"
+                        f"Skipping trainee {employee_id} - shift_day is None"
                     )
                     continue
 
                 try:
                     schedule_object = TutorsSchedule()
 
-                    # Данные наставника
-                    schedule_object.tutor_employee_id = tutor.tutor_info.employee_id
-                    schedule_object.tutor_fullname = tutor.tutor_info.full_name
+                    # Данные наставника с безопасным извлечением
+                    tutor_info = safe_get_attr(tutor, "tutor_info")
+                    if tutor_info:
+                        schedule_object.tutor_employee_id = safe_get_attr(
+                            tutor_info, "employee_id"
+                        )
+                        schedule_object.tutor_fullname = safe_get_attr(
+                            tutor_info, "full_name"
+                        )
 
-                    # Данные стажера
-                    schedule_object.trainee_employee_id = trainee_data.employee_id
-                    schedule_object.trainee_fullname = trainee_data.full_name
-                    schedule_object.trainee_type = trainee_data.trainee_type
+                    # Данные стажера с безопасным извлечением
+                    schedule_object.trainee_employee_id = safe_get_attr(
+                        trainee_data, "employee_id"
+                    )
+                    schedule_object.trainee_fullname = safe_get_attr(
+                        trainee_data, "full_name"
+                    )
+                    schedule_object.trainee_type = safe_get_attr(
+                        trainee_data, "trainee_type"
+                    )
 
                     # Парсинг даты тренировки
-                    training_day = datetime.strptime(trainee_data.shift_day, "%d.%m.%Y")
+                    training_day = datetime.strptime(shift_day, "%d.%m.%Y")
                     schedule_object.training_day = training_day
                     training_date = training_day.date()
 
                     # Обработка времени начала смены
-                    if trainee_data.shift_start:
+                    shift_start = safe_get_attr(trainee_data, "shift_start")
+                    if shift_start:
                         schedule_object.training_start_time = datetime.combine(
                             training_date,
-                            datetime.strptime(trainee_data.shift_start, "%H:%M").time(),
+                            datetime.strptime(shift_start, "%H:%M").time(),
                         )
                     else:
                         schedule_object.training_start_time = None
 
                     # Обработка времени окончания смены
-                    if trainee_data.shift_end:
+                    shift_end = safe_get_attr(trainee_data, "shift_end")
+                    if shift_end:
                         schedule_object.training_end_time = datetime.combine(
                             training_date,
-                            datetime.strptime(trainee_data.shift_end, "%H:%M").time(),
+                            datetime.strptime(shift_end, "%H:%M").time(),
                         )
                     else:
                         schedule_object.training_end_time = None
@@ -156,14 +178,13 @@ class TutorScheduleDataExtractor:
                     schedule_objects.append(schedule_object)
 
                     logger.debug(
-                        f"Processed: {trainee_data.employee_id} - {trainee_data.shift_day} "
-                        f"{trainee_data.shift_start}-{trainee_data.shift_end}"
+                        f"Processed: {schedule_object.trainee_employee_id} - {shift_day} "
+                        f"{shift_start}-{shift_end}"
                     )
 
                 except Exception as e:
-                    logger.error(
-                        f"Error processing trainee {trainee_data.employee_id}: {e}"
-                    )
+                    employee_id = safe_get_attr(trainee_data, "employee_id", "unknown")
+                    logger.error(f"Error processing trainee {employee_id}: {e}")
                     continue
 
         return schedule_objects

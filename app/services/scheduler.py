@@ -15,13 +15,13 @@ from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
 from app.api.tutors import TutorsAPI
 from app.core.config import settings
-from app.tasks.employees import (
+from app.tasks.employees.employees import (
     fill_birthdays,
     fill_employee_ids,
     fill_employment_dates,
 )
-from app.tasks.kpi import fill_day_kpi, fill_kpi, fill_month_kpi, fill_week_kpi
-from app.tasks.premium import fill_heads_premium, fill_specialists_premium
+from app.tasks.kpi.kpi import fill_day_kpi, fill_kpi, fill_month_kpi, fill_week_kpi
+from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
 from app.tasks.tutors.tutors import fill_tutor_schedule
 
 
