@@ -63,6 +63,7 @@ class KpiAPI(BaseAPI):
     def __init__(self, session):
         super().__init__(session)
         self.service_url = "ure"
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     def _get_report_model(self, report_type: str) -> type[KPIDataRecord]:
         """Get the appropriate Pydantic model for the report type."""

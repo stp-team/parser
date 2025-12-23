@@ -7,6 +7,7 @@ from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
 from app.api.sl import SlAPI
+from app.api.tests import TestsAPI
 from app.api.tutors import TutorsAPI
 from app.core.auth import authenticate
 from app.core.config import settings
@@ -16,6 +17,7 @@ from app.tasks.employees.employees import fill_all_employee_data, fill_tutors
 from app.tasks.kpi.kpi import fill_kpi
 from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
 from app.tasks.sl.sl import fill_sl
+from app.tasks.tests.tests import fill_current_tests
 from app.tasks.tutors.tutors import fill_tutor_schedule
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ async def main():
         premium_api = PremiumAPI(session)
         sl_api = SlAPI(session)
         tutors_api = TutorsAPI(session)
+        tests_api = TestsAPI(session)
 
         db_url = None
         if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
@@ -55,6 +58,7 @@ async def main():
             kpi_api=kpi_api,
             premium_api=premium_api,
             tutors_api=tutors_api,
+            tests_api=tests_api,
             db_url=db_url,
             max_workers=settings.SCHEDULER_MAX_WORKERS,
         )
@@ -78,6 +82,7 @@ async def main():
             await fill_tutors(tutors_api, employees_api)
             await fill_tutor_schedule(tutors_api)
             await fill_sl(sl_api)
+            await fill_current_tests(tests_api)
             logger.info("Получение данных при старте завершено")
 
             try:

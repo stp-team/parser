@@ -1,3 +1,5 @@
+import logging
+
 from app.api.base import BaseAPI
 from app.models.sl import ReportData, SlRootModel
 
@@ -6,6 +8,7 @@ class SlAPI(BaseAPI):
     def __init__(self, session):
         super().__init__(session)
         self.service_url = "genesys/ntp"
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     async def get_vq_chat_filter(self) -> SlRootModel | None:
         response = await self.post(endpoint=f"{self.service_url}/get-vq-chat-filter")

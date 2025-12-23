@@ -10,6 +10,7 @@ class PremiumAPI(BaseAPI):
     def __init__(self, session):
         super().__init__(session)
         self.service_url = "premium"
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     async def get_specialist_premium(
         self,

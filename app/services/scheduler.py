@@ -13,6 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.api.employees import EmployeesAPI
 from app.api.kpi import KpiAPI
 from app.api.premium import PremiumAPI
+from app.api.tests import TestsAPI
 from app.api.tutors import TutorsAPI
 from app.core.config import settings
 from app.tasks.employees.employees import (
@@ -23,6 +24,7 @@ from app.tasks.employees.employees import (
 )
 from app.tasks.kpi.kpi import fill_day_kpi, fill_month_kpi, fill_week_kpi
 from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
+from app.tasks.tests.tests import fill_current_tests
 from app.tasks.tutors.tutors import fill_tutor_schedule
 
 
@@ -33,6 +35,7 @@ class Scheduler:
         kpi_api: KpiAPI,
         premium_api: PremiumAPI,
         tutors_api: TutorsAPI,
+        tests_api: TestsAPI,
         db_url: str | None = None,
         max_workers: int = 5,
     ):
@@ -43,6 +46,7 @@ class Scheduler:
             kpi_api: Экземпляр API KPI
             premium_api: Экземпляр API премиума
             tutors_api: Экземпляр API наставников
+            tests_api: Экземпляр API тестов
             db_url: URL на БД (опционально, для сохранения задач)
             max_workers: Максимальное количество одновременных задач
         """
@@ -51,6 +55,7 @@ class Scheduler:
         self.kpi_api = kpi_api
         self.premium_api = premium_api
         self.tutors_api = tutors_api
+        self.tests_api = tests_api
         self.max_workers = max_workers
         self._is_running = False
         self._shutdown_event = asyncio.Event()
@@ -127,6 +132,7 @@ class Scheduler:
         await self._setup_kpi()
         await self._setup_premium()
         await self._setup_tutors()
+        await self._setup_tests()
 
         self.scheduler.add_job(
             self._scheduler_health_check,
@@ -242,6 +248,19 @@ class Scheduler:
         )
 
         self.logger.info("[Планировщик] Задачи наставников настроены")
+
+    async def _setup_tests(self) -> None:
+        """Настройка задач, связанных с тестами."""
+        self.scheduler.add_job(
+            self._safe_job_wrapper(fill_current_tests, "tests_current"),
+            trigger=IntervalTrigger(minutes=10),
+            args=[self.tests_api],
+            id="tests_current",
+            name="Заполнение назначенных тестов",
+            replace_existing=True,
+        )
+
+        self.logger.info("[Планировщик] Задачи тестов настроены")
 
     def _safe_job_wrapper(self, job_func, job_name: str):
         """Обертка для задач."""

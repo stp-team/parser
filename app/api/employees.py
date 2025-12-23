@@ -1,3 +1,5 @@
+import logging
+
 from pydantic import TypeAdapter
 
 from app.api.base import BaseAPI
@@ -8,6 +10,7 @@ class EmployeesAPI(BaseAPI):
     def __init__(self, session):
         super().__init__(session)
         self.service_url = "dossier"
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     async def get_employees(self, exclude_fired: bool = False) -> list[Employee] | None:
         employee_list_adapter = TypeAdapter(list[Employee])

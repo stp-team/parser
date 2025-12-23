@@ -1,3 +1,5 @@
+import logging
+
 from app.api.base import BaseAPI
 from app.models.tutors import GraphFiltersResponse, TutorGraphResponse
 
@@ -6,6 +8,7 @@ class TutorsAPI(BaseAPI):
     def __init__(self, session):
         super().__init__(session)
         self.service_url = "tutor-graph/tutor-api"
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     async def get_full_graph(
         self,
