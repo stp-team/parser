@@ -197,105 +197,91 @@ class TutorProcessor(APIProcessor[dict, TutorProcessingConfig]):
     async def save_data(
         self, data: list[dict], config: TutorProcessingConfig, **kwargs
     ) -> int:
-        """Сохраняем данные наставников с использованием оптимизированных SQLAlchemy операций."""
+        """Сохраняем данные наставников используя стандартный BatchDBOperator."""
 
         if not data:
             self.logger.info("Нет данных наставников для сохранения")
             return 0
 
+        # Используем стандартный паттерн с get_stp_session и BatchDBOperator
         async with get_stp_session() as session:
-            # Начинаем транзакцию для всех операций
-            async with session.begin():
-                from sqlalchemy import select, update
+            from sqlalchemy import select, update
 
-                # Шаг 1: Сбрасываем все флаги наставников одним SQL запросом
-                reset_stmt = (
+            from app.tasks.base import BatchDBOperator
+
+            db_operator = BatchDBOperator(session)
+
+            # Получаем fullnames для поиска
+            fullnames = [tutor["full_name"] for tutor in data if tutor.get("full_name")]
+
+            if not fullnames:
+                self.logger.info("Нет валидных имен наставников для обновления")
+                return 0
+
+            # НЕ сбрасываем всех наставников сразу - это блокирует таблицу!
+            # Вместо этого обновим только тех, кто изменился
+
+            # Получаем user_id для сотрудников, которые станут наставниками
+            employees_stmt = select(Employee.user_id, Employee.fullname).where(
+                Employee.fullname.in_(fullnames)
+            )
+            employees_result = await session.execute(employees_stmt)
+            employees_dict = {row.fullname: row.user_id for row in employees_result}
+
+            self.logger.info(
+                f"Найдено {len(employees_dict)} сотрудников для обновления"
+            )
+
+            # Получаем текущих наставников для сравнения
+            current_tutors_stmt = select(
+                Employee.user_id, Employee.is_tutor, Employee.tutor_type
+            ).where(Employee.is_tutor)
+            current_tutors_result = await session.execute(current_tutors_stmt)
+            current_tutors = {
+                row.user_id: row.tutor_type for row in current_tutors_result
+            }
+
+            # Новые наставники из API
+            new_tutors = {}
+            for tutor in data:
+                fullname = tutor.get("full_name")
+                if fullname and fullname in employees_dict:
+                    user_id = employees_dict[fullname]
+                    new_tutors[user_id] = tutor.get("tutor_type", "")
+
+            # Найти кого нужно сбросить (были наставниками, но больше не являются)
+            to_remove = set(current_tutors.keys()) - set(new_tutors.keys())
+            # Найти кого нужно добавить или обновить
+            to_update = new_tutors
+
+            updated_count = 0
+
+            # ТОЛЬКО ЦЕЛЕВЫЕ ОБНОВЛЕНИЯ (БЕЗ блокировки всей таблицы)
+            if to_remove:
+                # Сброс только конкретных пользователей
+                remove_stmt = (
                     update(Employee)
-                    .where(Employee.is_tutor)
+                    .where(Employee.user_id.in_(list(to_remove)))
                     .values(is_tutor=False, tutor_type=None)
                 )
-                reset_result = await session.execute(reset_stmt)
-                reset_count = reset_result.rowcount
-                self.logger.info(f"Сброшено флагов наставников: {reset_count}")
+                result = await session.execute(remove_stmt)
+                updated_count += result.rowcount
 
-                # Шаг 2: Получаем только сотрудников, которых нужно обновить
-                fullnames = [
-                    tutor["full_name"] for tutor in data if tutor.get("full_name")
-                ]
+            if to_update:
+                # Обновление только конкретных пользователей
+                for user_id, tutor_type in to_update.items():
+                    update_stmt = (
+                        update(Employee)
+                        .where(Employee.user_id == user_id)
+                        .values(is_tutor=True, tutor_type=tutor_type)
+                    )
+                    result = await session.execute(update_stmt)
+                    updated_count += result.rowcount
 
-                if not fullnames:
-                    self.logger.info("Нет валидных имен наставников для обновления")
-                    return 0
+            await session.commit()
 
-                # Получаем только нужных сотрудников одним запросом
-                employees_stmt = select(Employee.user_id, Employee.fullname).where(
-                    Employee.fullname.in_(fullnames)
-                )
-                employees_result = await session.execute(employees_stmt)
-                employees_dict = {row.fullname: row.user_id for row in employees_result}
-
-                self.logger.info(
-                    f"Найдено {len(employees_dict)} сотрудников для обновления"
-                )
-
-                # Шаг 3: Подготавливаем данные для batch update
-                update_operations = []
-                tutor_employees_found = 0
-
-                for tutor in data:
-                    fullname = tutor.get("full_name")
-                    if not fullname:
-                        continue
-
-                    user_id = employees_dict.get(fullname)
-                    if user_id:
-                        update_operations.append(
-                            {
-                                "user_id": user_id,
-                                "tutor_type": tutor.get("tutor_type", ""),
-                            }
-                        )
-                        tutor_employees_found += 1
-                        self.logger.debug(f"Найден наставник: {fullname}")
-                    else:
-                        self.logger.debug(f"Не найден сотрудник с именем: {fullname}")
-
-                # Шаг 4: Обновляем наставников batch операциями
-                update_count = 0
-                if update_operations:
-                    # Выполняем обновления небольшими группами для лучшей производительности
-                    batch_size = 100
-                    for i in range(0, len(update_operations), batch_size):
-                        batch = update_operations[i : i + batch_size]
-                        user_ids = [op["user_id"] for op in batch]
-
-                        # Сначала устанавливаем is_tutor = True для этой группы
-                        update_stmt = (
-                            update(Employee)
-                            .where(Employee.user_id.in_(user_ids))
-                            .values(is_tutor=True)
-                        )
-                        batch_result = await session.execute(update_stmt)
-                        update_count += batch_result.rowcount
-
-                        # Затем обновляем tutor_type индивидуально для каждого (быстро для малых групп)
-                        for op in batch:
-                            tutor_type_stmt = (
-                                update(Employee)
-                                .where(Employee.user_id == op["user_id"])
-                                .values(tutor_type=op["tutor_type"])
-                            )
-                            await session.execute(tutor_type_stmt)
-
-                self.logger.info(
-                    f"Найдено и обновлено {tutor_employees_found} наставников"
-                )
-                self.logger.info(f"SQL обновлено записей: {update_count}")
-                self.logger.info(
-                    f"Всего затронуто записей: {reset_count + update_count}"
-                )
-
-                return update_count
+            self.logger.info(f"Обновлено {updated_count} наставников")
+            return updated_count
 
 
 # Конфигурация для оптимизированной обработки наставников

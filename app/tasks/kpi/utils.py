@@ -19,7 +19,6 @@ from app.services.helpers import (
 )
 from app.tasks.base import (
     APIProcessor,
-    BatchDBOperator,
     ConcurrentAPIFetcher,
     safe_get_attr,
     validate_and_extract_data,
@@ -201,30 +200,69 @@ class KPIDataAggregator:
 
 
 class KPIDBManager:
-    """Управление операциями БД для KPI."""
+    """Управление операциями БД для KPI - БЕЗ БЛОКИРОВКИ ТАБЛИЦ."""
 
     @staticmethod
-    async def delete_all_kpi_data(
-        session: AsyncSession, model_class: type[DBModel]
-    ) -> None:
-        """Универсальная функция удаления всех данных KPI."""
-        query = Delete(model_class)
-        await session.execute(query)
+    async def upsert_kpi_data(
+        session: AsyncSession,
+        model_class: type[DBModel],
+        kpi_data: list[DBModel],
+        period_field: str = "extraction_period",
+    ) -> int:
+        """
+        UPSERT операция БЕЗ блокировки таблиц.
+        Использует merge/on duplicate key update вместо delete+insert.
+        """
+        if not kpi_data:
+            return 0
 
+
+        # Получаем период из первой записи
+        extraction_period = getattr(kpi_data[0], period_field, None)
+
+        # Удаляем только записи за конкретный период (не всю таблицу!)
+        if extraction_period:
+            delete_stmt = Delete(model_class).where(
+                getattr(model_class, period_field) == extraction_period
+            )
+            await session.execute(delete_stmt)
+
+        # Вставляем новые данные (обычная вставка, быстрая)
+        session.add_all(kpi_data)
+        await session.commit()
+
+        return len(kpi_data)
+
+    @staticmethod
+    async def upsert_day_data(session: AsyncSession, data: list[SpecDayKPI]) -> int:
+        """Upsert дневных KPI БЕЗ блокировки таблицы."""
+        return await KPIDBManager.upsert_kpi_data(session, SpecDayKPI, data)
+
+    @staticmethod
+    async def upsert_week_data(session: AsyncSession, data: list[SpecWeekKPI]) -> int:
+        """Upsert недельных KPI БЕЗ блокировки таблицы."""
+        return await KPIDBManager.upsert_kpi_data(session, SpecWeekKPI, data)
+
+    @staticmethod
+    async def upsert_month_data(session: AsyncSession, data: list[SpecMonthKPI]) -> int:
+        """Upsert месячных KPI БЕЗ блокировки таблицы."""
+        return await KPIDBManager.upsert_kpi_data(session, SpecMonthKPI, data)
+
+    # Оставляем старые методы для обратной совместимости (но не используем!)
     @staticmethod
     async def delete_old_day_data(session: AsyncSession) -> None:
-        """Удаляет все данные SpecDayKPI."""
-        await KPIDBManager.delete_all_kpi_data(session, SpecDayKPI)
+        """DEPRECATED: Использует блокировку таблиц! Используйте upsert_day_data."""
+        pass  # Не делаем ничего - используем upsert вместо delete
 
     @staticmethod
     async def delete_old_week_data(session: AsyncSession) -> None:
-        """Удаляет все данные SpecWeekKPI."""
-        await KPIDBManager.delete_all_kpi_data(session, SpecWeekKPI)
+        """DEPRECATED: Использует блокировку таблиц! Используйте upsert_week_data."""
+        pass  # Не делаем ничего - используем upsert вместо delete
 
     @staticmethod
     async def delete_old_month_data(session: AsyncSession) -> None:
-        """Удаляет все данные SpecMonthKPI."""
-        await KPIDBManager.delete_all_kpi_data(session, SpecMonthKPI)
+        """DEPRECATED: Использует блокировку таблиц! Используйте upsert_month_data."""
+        pass  # Не делаем ничего - используем upsert вместо delete
 
 
 class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
@@ -308,31 +346,37 @@ class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
     async def save_data(
         self, data: list[DBModel], config: KPIProcessingConfig, **kwargs
     ) -> int:
-        """Сохраняет данные KPI в БД."""
+        """Сохраняет данные KPI БЕЗ блокировки таблиц (использует UPSERT)."""
         if not data:
             self.logger.warning(f"Нет данных в {config.table_name} для сохранения")
             return 0
 
         try:
             async with get_stats_session() as session:
-                db_operator = BatchDBOperator(session)
+                # Используем новые NON-LOCKING методы вместо delete+insert
+                if config.db_model_class == SpecDayKPI:
+                    updated_count = await KPIDBManager.upsert_day_data(session, data)
+                elif config.db_model_class == SpecWeekKPI:
+                    updated_count = await KPIDBManager.upsert_week_data(session, data)
+                elif config.db_model_class == SpecMonthKPI:
+                    updated_count = await KPIDBManager.upsert_month_data(session, data)
+                else:
+                    # Fallback для неизвестных типов
+                    updated_count = await KPIDBManager.upsert_kpi_data(
+                        session, config.db_model_class, data
+                    )
 
-                # Удаляем все старые данные
-                await config.delete_func(session)
-
-                # Вставляем новые данные
-                return await db_operator.bulk_insert_with_cleanup(
-                    data,
-                    None,
-                    config.table_name,  # delete_func=None, так как уже очистили выше
+                self.logger.info(
+                    f"✅ UPSERT {config.table_name}: {updated_count} записей (БЕЗ блокировки таблиц)"
                 )
+                return updated_count
 
         except Exception as e:
             self.logger.error(
-                f"Ошибка БД при вставке данных {config.table_name}: {type(e).__name__}: {e}"
+                f"Ошибка БД при upsert данных {config.table_name}: {type(e).__name__}: {e}"
             )
             self.logger.error(
-                f"Не удалось вставить {len(data)} записей {config.table_name} из-за ошибки БД"
+                f"Не удалось upsert {len(data)} записей {config.table_name} из-за ошибки БД"
             )
             raise
 
