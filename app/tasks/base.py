@@ -859,7 +859,7 @@ def create_task_function(
         ... )
         >>> # Эквивалентно:
         >>> @log_processing_time("заполнение Service Level данных")
-        >>> async def fill_sl(api: SlAPI) -> None:
+        >>> async def fill_sl(api: Any) -> None:
         ...     processor = SLProcessor(api)
         ...     return await processor.process_with_config(SL_CONFIG)
     """

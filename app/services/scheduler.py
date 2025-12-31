@@ -9,12 +9,8 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from okc_py import Client
 
-from app.api.employees import EmployeesAPI
-from app.api.kpi import KpiAPI
-from app.api.premium import PremiumAPI
-from app.api.tests import TestsAPI
-from app.api.tutors import TutorsAPI
 from app.core.config import settings
 from app.tasks.employees.employees import (
     fill_birthdays,
@@ -31,31 +27,19 @@ from app.tasks.tutors.tutors import fill_tutor_schedule
 class Scheduler:
     def __init__(
         self,
-        employees_api: EmployeesAPI,
-        kpi_api: KpiAPI,
-        premium_api: PremiumAPI,
-        tutors_api: TutorsAPI,
-        tests_api: TestsAPI,
+        okc_client: Client,
         db_url: str | None = None,
         max_workers: int = 5,
     ):
         """Инициализация планировщика.
 
         Args:
-            employees_api: Экземпляр API сотрудников
-            kpi_api: Экземпляр API KPI
-            premium_api: Экземпляр API премиума
-            tutors_api: Экземпляр API наставников
-            tests_api: Экземпляр API тестов
+            okc_client: Единый клиент OKC для всех API
             db_url: URL на БД (опционально, для сохранения задач)
             max_workers: Максимальное количество одновременных задач
         """
         self.logger = logging.getLogger(__name__)
-        self.employees_api = employees_api
-        self.kpi_api = kpi_api
-        self.premium_api = premium_api
-        self.tutors_api = tutors_api
-        self.tests_api = tests_api
+        self.okc_client = okc_client
         self.max_workers = max_workers
         self._is_running = False
         self._shutdown_event = asyncio.Event()
@@ -147,7 +131,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employee_ids, "employees_ids"),
             trigger=IntervalTrigger(hours=2),
-            args=[self.employees_api],
+            args=[self.okc_client.dossier],
             id="employees_ids",
             name="Заполнение идентификатора OKC",
             replace_existing=True,
@@ -156,7 +140,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_birthdays, "employees_birthdays"),
             trigger=IntervalTrigger(hours=2),
-            args=[self.employees_api],
+            args=[self.okc_client.dossier],
             id="employees_birthdays",
             name="Заполнение дней рождений",
             replace_existing=True,
@@ -165,7 +149,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employment_dates, "employees_employment_dates"),
             trigger=IntervalTrigger(hours=2),
-            args=[self.employees_api],
+            args=[self.okc_client.dossier],
             id="employees_employment_dates",
             name="Заполнение дат трудоустройства",
             replace_existing=True,
@@ -174,7 +158,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_tutors, "employees_tutors"),
             trigger=IntervalTrigger(minutes=5),
-            args=[self.tutors_api, self.employees_api],
+            args=[self.okc_client.tutors, self.okc_client.dossier],
             id="employees_tutors",
             name="Заполнение наставников",
             replace_existing=True,
@@ -187,7 +171,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_day_kpi, "fill_day_kpi"),
             trigger=CronTrigger(hour=10, minute=0),
-            args=[self.kpi_api],
+            args=[self.okc_client.ure],
             id="fill_day_kpi",
             name="Заполнение дневных показателей KPI",
             replace_existing=True,
@@ -196,7 +180,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_week_kpi, "fill_week_kpi"),
             trigger=CronTrigger(day_of_week="mon", hour=10, minute=0),
-            args=[self.kpi_api],
+            args=[self.okc_client.ure],
             id="fill_week_kpi",
             name="Заполнение недельных показателей KPI",
             replace_existing=True,
@@ -205,7 +189,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_month_kpi, "fill_month_kpi"),
             trigger=CronTrigger(day=4, hour=10, minute=0),
-            args=[self.kpi_api],
+            args=[self.okc_client.ure],
             id="fill_month_kpi",
             name="Заполнение месячных показателей KPI",
             replace_existing=True,
@@ -218,7 +202,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_specialists_premium, "premium_specialists"),
             trigger=IntervalTrigger(minutes=15),
-            args=[self.premium_api],
+            args=[self.okc_client.premium],
             id="premium_specialists",
             name="Заполнение премиума специалистов",
             replace_existing=True,
@@ -226,7 +210,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_heads_premium, "premium_heads"),
             trigger=IntervalTrigger(minutes=15),
-            args=[self.premium_api],
+            args=[self.okc_client.premium],
             id="premium_heads",
             name="Заполнение премиума руководителей",
             replace_existing=True,
@@ -241,7 +225,7 @@ class Scheduler:
                 "tutors",
             ),
             trigger=IntervalTrigger(minutes=5),
-            args=[self.tutors_api],
+            args=[self.okc_client.tutors],
             id="tutors",
             name="Обновление расписания наставников",
             replace_existing=True,
@@ -254,7 +238,7 @@ class Scheduler:
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_current_tests, "tests_current"),
             trigger=IntervalTrigger(minutes=10),
-            args=[self.tests_api],
+            args=[self.okc_client.tests],
             id="tests_current",
             name="Заполнение назначенных тестов",
             replace_existing=True,

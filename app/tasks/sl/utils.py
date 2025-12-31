@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from okc_py.repos import SlAPI
 from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database.models.Stats.sl import SL
 
-from app.api.sl import SlAPI
 from app.core.db import get_stats_session
 from app.tasks.base import (
     APIProcessor,
@@ -155,7 +155,7 @@ class SLProcessingConfig(ProcessingConfig):
 class SLProcessor(APIProcessor[SL, SLProcessingConfig]):
     """Процессор для обработки данных Service Level."""
 
-    def __init__(self, api: SlAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
         self.fetcher = ConcurrentAPIFetcher()
         # Создаем маппер полей для конвертации данных

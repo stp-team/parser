@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from okc_py.repos import UreAPI
 from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database.models.Stats import SpecDayKPI, SpecMonthKPI, SpecWeekKPI
 
-from app.api.kpi import KpiAPI
 from app.core.db import get_stats_session
 from app.services.helpers import (
     get_current_month_first_day,
@@ -230,7 +230,7 @@ class KPIDBManager:
 class KPIProcessor(APIProcessor[DBModel, KPIProcessingConfig]):
     """Процессор для обработки данных KPI."""
 
-    def __init__(self, api: KpiAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
         self.fetcher = ConcurrentAPIFetcher()
 
@@ -353,7 +353,7 @@ def create_kpi_config(period_type: str) -> KPIProcessingConfig:
     """
     # Общие параметры для всех типов KPI
     base_config = {
-        "divisions": list(KpiAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
+        "divisions": list(UreAPI.unites.keys()),  # ["НТП1", "НТП2", "НЦК"]
         "report_types": [
             "AHT",
             "FLR",

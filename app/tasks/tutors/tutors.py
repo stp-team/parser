@@ -1,8 +1,8 @@
 import logging
+from typing import Any
 
 from stp_database.repo.STP import MainRequestsRepo
 
-from app.api.tutors import TutorsAPI
 from app.core.db import get_stp_session
 from app.tasks.base import (
     APIProcessor,
@@ -32,7 +32,7 @@ _create_tutor_config = create_config_factory(
 
 @log_processing_time("обновление расписания наставников")
 async def fill_tutor_schedule(
-    api: TutorsAPI, periods: list[tuple[str, str]] = None, full_update: bool = False
+    api: Any, periods: list[tuple[str, str]] = None, full_update: bool = False
 ) -> int:
     """
     Основная функция для обновления расписания наставников.
@@ -66,7 +66,7 @@ async def fill_tutor_schedule(
 
 @log_processing_time("заполнение расписания наставников за указанные периоды")
 async def fill_tutor_schedule_for_periods(
-    api: TutorsAPI, periods: list[tuple[str, str]]
+    api: Any, periods: list[tuple[str, str]]
 ) -> int:
     """
     Обновляет расписание наставников за указанные периоды.
@@ -89,7 +89,7 @@ async def fill_tutor_schedule_for_periods(
 class TutorInfoProcessor(APIProcessor):
     """Процессор для обновления информации о наставничестве сотрудников."""
 
-    def __init__(self, api: TutorsAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
 
     async def fetch_data(self, config, **kwargs):
@@ -254,7 +254,7 @@ class TutorInfoProcessor(APIProcessor):
 
 
 @log_processing_time("обновление информации о наставничестве")
-async def fill_tutor_info(api: TutorsAPI) -> int:
+async def fill_tutor_info(api: Any) -> int:
     """
     Обновляет информацию о наставничестве сотрудников.
 

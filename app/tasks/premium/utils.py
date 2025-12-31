@@ -3,11 +3,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from okc_py.repos import PremiumAPI
 from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database.models.Stats import HeadPremium, SpecPremium
 
-from app.api.premium import PremiumAPI
 from app.core.db import get_stats_session
 from app.tasks.base import (
     APIProcessor,
@@ -207,7 +207,7 @@ class PremiumDBManager:
 class PremiumProcessor(APIProcessor[DBModel, PremiumProcessingConfig]):
     """Процессор для обработки данных премий."""
 
-    def __init__(self, api: PremiumAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
         self.fetcher = ConcurrentAPIFetcher()
 

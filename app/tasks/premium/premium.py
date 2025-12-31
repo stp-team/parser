@@ -1,9 +1,9 @@
 import asyncio
 import logging
 
+from okc_py.repos import PremiumAPI
 from stp_database.models.Stats import HeadPremium, SpecPremium
 
-from app.api.premium import PremiumAPI
 from app.services.constants import unites
 from app.tasks.base import (
     log_processing_time,
@@ -43,7 +43,7 @@ HEAD_PREMIUM_CONFIG = PremiumProcessingConfig(
 
 
 @log_processing_time("заполнение премий специалистов")
-async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -> None:
+async def fill_specialists_premium(api: Any, period: str | None = None) -> None:
     """
     Получает данные о премиях специалистов.
 
@@ -59,7 +59,7 @@ async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -
 
 
 @log_processing_time("заполнение премий руководителей")
-async def fill_heads_premium(api: PremiumAPI, period: str | None = None) -> None:
+async def fill_heads_premium(api: Any, period: str | None = None) -> None:
     """
     Получает данные о премиях руководителей.
 
@@ -76,7 +76,7 @@ async def fill_heads_premium(api: PremiumAPI, period: str | None = None) -> None
 
 @log_processing_time("заполнение премий специалистов за несколько периодов")
 async def fill_specialists_premium_multiple_periods(
-    api: PremiumAPI, periods: list[str] | None = None
+    api: Any, periods: list[str] | None = None
 ) -> None:
     """
     Получает данные о премиях специалистов за несколько периодов.
@@ -96,7 +96,7 @@ async def fill_specialists_premium_multiple_periods(
 
 @log_processing_time("заполнение премий руководителей за несколько периодов")
 async def fill_heads_premium_multiple_periods(
-    api: PremiumAPI, periods: list[str] | None = None
+    api: Any, periods: list[str] | None = None
 ) -> None:
     """
     Получает данные о премиях руководителей за несколько периодов.
@@ -115,7 +115,7 @@ async def fill_heads_premium_multiple_periods(
 
 
 @log_processing_time("заполнение всех премий за последние 6 месяцев")
-async def fill_all_premium_last_6_months(api: PremiumAPI) -> None:
+async def fill_all_premium_last_6_months(api: Any) -> None:
     """
     Получает данные о премиях всех сотрудников за последние 6 месяцев.
 

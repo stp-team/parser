@@ -8,7 +8,6 @@ from sqlalchemy import Delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database.models.Stats.tutors_schedule import TutorsSchedule
 
-from app.api.tutors import TutorsAPI
 from app.core.db import get_stats_session
 from app.tasks.base import (
     APIProcessor,
@@ -202,7 +201,7 @@ class TutorScheduleProcessor(
 ):
     """Процессор для обработки данных расписания наставников."""
 
-    def __init__(self, api: TutorsAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
 
     async def fetch_data(

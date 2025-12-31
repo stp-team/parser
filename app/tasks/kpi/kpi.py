@@ -1,7 +1,7 @@
 import asyncio
 import logging
+from typing import Any
 
-from app.api.kpi import KpiAPI
 from app.tasks.base import (
     log_processing_time,
 )
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 @log_processing_time("заполнение дневных KPI")
-async def fill_day_kpi(api: KpiAPI) -> None:
+async def fill_day_kpi(api: Any) -> None:
     """Заполняет дневную таблицу KPI."""
     processor = KPIProcessor(api)
     config = create_kpi_config("day")
@@ -19,7 +19,7 @@ async def fill_day_kpi(api: KpiAPI) -> None:
 
 
 @log_processing_time("заполнение недельных KPI")
-async def fill_week_kpi(api: KpiAPI) -> None:
+async def fill_week_kpi(api: Any) -> None:
     """Заполняет недельную таблицу KPI."""
     processor = KPIProcessor(api)
     config = create_kpi_config("week")
@@ -27,7 +27,7 @@ async def fill_week_kpi(api: KpiAPI) -> None:
 
 
 @log_processing_time("заполнение месячных KPI")
-async def fill_month_kpi(api: KpiAPI) -> None:
+async def fill_month_kpi(api: Any) -> None:
     """Заполняет месячную таблицу KPI."""
     processor = KPIProcessor(api)
     config = create_kpi_config("month")
@@ -35,7 +35,7 @@ async def fill_month_kpi(api: KpiAPI) -> None:
 
 
 @log_processing_time("заполнение всех KPI")
-async def fill_kpi(api: KpiAPI) -> None:
+async def fill_kpi(api: Any) -> None:
     """
     Основная функция для вызова в планировщике.
 

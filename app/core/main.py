@@ -1,16 +1,12 @@
 import asyncio
 import logging
 
-from aiohttp import ClientSession
+from okc_py import Client
+from okc_py.config import Settings
 
-from app.api.employees import EmployeesAPI
-from app.api.kpi import KpiAPI
-from app.api.premium import PremiumAPI
-from app.api.sl import SlAPI
-from app.api.tests import TestsAPI
-from app.api.tutors import TutorsAPI
-from app.core.auth import authenticate
 from app.core.config import settings
+from app.core.nats_client import nats_client
+from app.core.nats_router import setup_nats_router
 from app.services.logger import setup_logging
 from app.services.scheduler import Scheduler
 from app.tasks.employees.employees import fill_all_employee_data, fill_tutors
@@ -29,23 +25,24 @@ async def main():
 
     session = None
 
-    try:
-        # Инициализация сессии и авторизация
-        session = ClientSession(base_url=settings.OKC_BASE_URL)
-        await authenticate(
-            username=settings.OKC_USERNAME,
-            password=settings.OKC_PASSWORD,
-            session=session,
+    okc_client = Client(
+        settings=Settings(
+            BASE_URL=settings.OKC_BASE_URL,
+            USERNAME=settings.OKC_USERNAME,
+            PASSWORD=settings.OKC_PASSWORD,
         )
-        logger.info("Успешная авторизация на OKC")
+    )
+    try:
+        await okc_client.connect()
 
-        # Инициализация API клиентов
-        employees_api = EmployeesAPI(session)
-        kpi_api = KpiAPI(session)
-        premium_api = PremiumAPI(session)
-        sl_api = SlAPI(session)
-        tutors_api = TutorsAPI(session)
-        tests_api = TestsAPI(session)
+        # Инициализация и настройка NATS
+        try:
+            await nats_client.connect()
+            await setup_nats_router(okc_client=okc_client)
+            await nats_client.subscribe_to_commands()
+            logger.info("NATS client и router настроены")
+        except Exception as e:
+            logger.warning(f"Не удалось настроить NATS: {e}")
 
         db_url = None
         if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
@@ -54,11 +51,7 @@ async def main():
 
         # Инициализация планировщика
         scheduler = Scheduler(
-            employees_api=employees_api,
-            kpi_api=kpi_api,
-            premium_api=premium_api,
-            tutors_api=tutors_api,
-            tests_api=tests_api,
+            okc_client=okc_client,
             db_url=db_url,
             max_workers=settings.SCHEDULER_MAX_WORKERS,
         )
@@ -73,17 +66,18 @@ async def main():
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
 
-            # Заполнение данных при старте
-            logger.info("Запуск получения данных при старте парсера...")
-            await fill_all_employee_data(employees_api)
-            await fill_kpi(kpi_api)
-            await fill_heads_premium(premium_api)
-            await fill_specialists_premium(premium_api)
-            await fill_tutors(tutors_api, employees_api)
-            await fill_tutor_schedule(tutors_api)
-            await fill_sl(sl_api)
-            await fill_current_tests(tests_api)
-            logger.info("Получение данных при старте завершено")
+            if settings.ENVIRONMENT != "dev":
+                # Заполнение данных при старте
+                logger.info("Запуск получения данных при старте парсера...")
+                await fill_all_employee_data(okc_client.dossier)
+                await fill_kpi(okc_client.ure)
+                await fill_heads_premium(okc_client.premium)
+                await fill_specialists_premium(okc_client.premium)
+                await fill_tutors(okc_client.tutors, okc_client.dossier)
+                await fill_tutor_schedule(okc_client.tutors)
+                await fill_sl(okc_client.sl)
+                await fill_current_tests(okc_client.tests)
+                logger.info("Получение данных при старте завершено")
 
             try:
                 while True:
@@ -105,6 +99,12 @@ async def main():
 
     finally:
         # Очистка ресурсов
+        try:
+            await nats_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Ошибка при закрытии NATS соединения: {e}")
+
+        await okc_client.close()
         if session:
             await session.close()
             logger.info("HTTP session closed")

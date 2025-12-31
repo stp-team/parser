@@ -4,18 +4,18 @@ version = "0.1.0"
 description = "Парсер"
 requires-python = ">=3.14"
 dependencies = [
-    "aiohttp>=3.13.2",
     "apscheduler>=3.11.1",
     "betterlogging>=1.0.0",
-    "dishka>=1.4.0",
+    "nats-py>=2.9.0",
+    "okc-py",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
-    "requests>=2.32.5",
     "stp-database",
 ]
 
 [tool.uv.sources]
 stp-database = { git = "https://github.com/STP-Team/stp-database" }
+okc-py = { git = "https://github.com/stp-team/okc-py.git" }
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

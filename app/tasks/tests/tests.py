@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database.models.Stats import AssignedTest
 from stp_database.repo.STP import MainRequestsRepo
 
-from app.api.tests import TestsAPI
 from app.core.db import get_stats_session, get_stp_session
 from app.tasks.base import (
     APIProcessor,
@@ -83,7 +82,7 @@ class TestsProcessingConfig(ProcessingConfig):
 class TestsProcessor(APIProcessor[AssignedTest, TestsProcessingConfig]):
     """Процессор для обработки данных назначенных тестов."""
 
-    def __init__(self, api: TestsAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
 
     async def fetch_data(
@@ -259,7 +258,7 @@ CURRENT_MONTH_TESTS_CONFIG = TestsProcessingConfig(
 
 @log_processing_time("заполнение данных назначенных тестов")
 async def fill_assigned_tests(
-    api: TestsAPI,
+    api: Any,
     start_date: str = None,
     end_date: str = None,
     subdivisions: list[int] = None,
@@ -268,7 +267,7 @@ async def fill_assigned_tests(
     Заполняет данные о назначенных тестах.
 
     Args:
-        api: Экземпляр TestsAPI
+        api: API клиент для тестов
         start_date: Начальная дата в формате DD.MM.YYYY (опционально)
         end_date: Конечная дата в формате DD.MM.YYYY (опционально)
         subdivisions: Список ID подразделений (опционально)
@@ -289,12 +288,12 @@ async def fill_assigned_tests(
 
 
 @log_processing_time("заполнение текущих данных тестов")
-async def fill_current_tests(api: TestsAPI) -> int:
+async def fill_current_tests(api: Any) -> int:
     """
     Заполняет данные тестов за текущий месяц.
 
     Args:
-        api: Экземпляр TestsAPI
+        api: API клиент для тестов
 
     Returns:
         Количество обработанных записей
@@ -305,7 +304,7 @@ async def fill_current_tests(api: TestsAPI) -> int:
 
 @log_processing_time("заполнение тестов за период")
 async def fill_period_tests(
-    api: TestsAPI,
+    api: Any,
     period: str,
     subdivisions: list[int] = None,
 ) -> int:
@@ -313,7 +312,7 @@ async def fill_period_tests(
     Заполняет данные тестов за указанный период.
 
     Args:
-        api: Экземпляр TestsAPI
+        api: API клиент для тестов
         period: Период в формате YYYY-MM
         subdivisions: Список ID подразделений (опционально)
 

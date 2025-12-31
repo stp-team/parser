@@ -3,11 +3,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
 from stp_database.repo.STP import MainRequestsRepo
 
-from app.api.employees import EmployeesAPI
 from app.core.db import get_stp_session
-from app.models.employees import EmployeeUpdateData
 from app.tasks.base import (
     APIProcessor,
     BatchDBOperator,
@@ -17,6 +16,18 @@ from app.tasks.base import (
     safe_get_attr,
     validate_api_result,
 )
+
+
+class EmployeeUpdateData(BaseModel):
+    """Данные для обновления сотрудника."""
+
+    user_id: int
+    fullname: str
+    birthday: str | None = None
+    employee_id: int | None = None
+    employment_date: str | None = None
+    is_tutor: bool | None = None
+    tutor_type: int | None = None
 
 
 @dataclass
@@ -287,7 +298,7 @@ class EmployeeDataExtractor:
 class EmployeeProcessor(APIProcessor[EmployeeUpdateData, EmployeeProcessingConfig]):
     """Процессор для обработки данных сотрудников."""
 
-    def __init__(self, api: EmployeesAPI):
+    def __init__(self, api: Any):
         super().__init__(api)
         self.matcher = EmployeeMatcher()
         self.fetcher = ConcurrentAPIFetcher()

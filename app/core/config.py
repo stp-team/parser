@@ -4,6 +4,8 @@ from pytz.tzinfo import DstTzInfo
 
 
 class Settings(BaseSettings):
+    ENVIRONMENT: str
+
     # Настройки OKC
     OKC_USERNAME: str
     OKC_PASSWORD: str
@@ -17,6 +19,12 @@ class Settings(BaseSettings):
 
     DB_STP_NAME: str
     DB_STATS_NAME: str
+
+    # Настройки NATS
+    NATS_HOST: str = ""
+    NATS_PORT: int = 4222
+    NATS_TOKEN: str = ""
+    NATS_SUBJECT: str = "api_test"
 
     # Настройки планировщика
     SCHEDULER_ENABLE_PERSISTENCE: bool = False

@@ -1,6 +1,7 @@
 import logging
 
-from app.api.sl import SlAPI
+from okc_py.repos import SlAPI
+
 from app.tasks.base import (
     create_config_factory,
     log_processing_time,
@@ -24,7 +25,7 @@ _create_sl_config = create_config_factory(
 
 
 @log_processing_time("заполнение Service Level данных")
-async def fill_sl(api: SlAPI, periods: list[tuple[str, str]] = None, **kwargs) -> int:
+async def fill_sl(api: Any, periods: list[tuple[str, str]] = None, **kwargs) -> int:
     """
     Основная функция для получения SL данных.
 
@@ -62,7 +63,7 @@ async def fill_sl(api: SlAPI, periods: list[tuple[str, str]] = None, **kwargs) -
 
 
 @log_processing_time("заполнение SL данных за указанные периоды")
-async def fill_sl_for_periods(api: SlAPI, periods: list[tuple[str, str]]) -> int:
+async def fill_sl_for_periods(api: Any, periods: list[tuple[str, str]]) -> int:
     """
     Заполняет SL данные за указанные периоды.
 

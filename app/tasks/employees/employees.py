@@ -3,13 +3,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from okc_py.repos import DossierAPI, TutorsAPI
 from stp_database.models.STP import Employee
 from stp_database.repo.STP import MainRequestsRepo
 
-from app.api.employees import EmployeesAPI
-from app.api.tutors import TutorsAPI
 from app.core.db import get_stp_session
-from app.models.employees import EmployeeUpdateData
 from app.tasks.base import (
     APIProcessor,
     PeriodHelper,
@@ -66,7 +64,7 @@ class TutorProcessingConfig(ProcessingConfig):
 class TutorProcessor(APIProcessor[dict, TutorProcessingConfig]):
     """Процессор для обработки данных наставников с оптимизированными batch операциями."""
 
-    def __init__(self, tutors_api: TutorsAPI, employees_api: EmployeesAPI):
+    def __init__(self, tutors_api: Any, employees_api: Any):
         super().__init__(tutors_api)
         self.tutors_api = tutors_api
         self.employees_api = employees_api
@@ -310,7 +308,7 @@ def create_employee_task(
     """Создает таски из конфига."""
 
     @log_processing_time(f"заполнение {config.update_type.lower()}")
-    async def task_function(api: EmployeesAPI) -> list[Any]:
+    async def task_function(api: Any) -> list[Any]:
         processor = EmployeeProcessor(api)
 
         # Получаем всех сотрудников из API
@@ -365,7 +363,7 @@ fill_all_employee_data = create_employee_task(
 
 
 @log_processing_time("заполнение информации о наставничестве")
-async def fill_tutors(tutors_api: TutorsAPI, employees_api: EmployeesAPI) -> list[Any]:
+async def fill_tutors(tutors_api: Any, employees_api: Any) -> list[Any]:
     """
     Оптимизированная версия заполнения информации о наставничестве сотрудников.
 
