@@ -20,6 +20,7 @@ def get_recent_periods(months: int = 6) -> list[str]:
 
     # Add current month
     from datetime import date
+
     current_month = date.today().strftime("%Y-%m")
     all_months = [current_month] + previous_months
 

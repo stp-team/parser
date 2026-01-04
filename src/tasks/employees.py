@@ -326,8 +326,13 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
             logger.warning("[Employees] No graph filters received from API")
             return 0
 
-        # Get period range
-        months = PeriodHelper.get_previous_months(6)
+        # Get period range (include current month)
+        from datetime import date
+
+        current_month = date.today().strftime("%Y-%m")
+        previous_months = PeriodHelper.get_previous_months(6)
+        months = [current_month] + previous_months
+
         first_period = months[0]
         last_period = months[-1]
 
