@@ -3,9 +3,9 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from typing import Any
 
-from okc_py import Client
+from okc_py import OKC
 
-from app.core.nats_client import nats_client
+from src.core.nats_client import nats_client
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,10 @@ class NATSRouter:
         apis = {}
         for api_name, api_instance in self.api_map.items():
             methods = [
-                method for method in dir(api_instance)
-                if not method.startswith('_') and callable(getattr(api_instance, method))
+                method
+                for method in dir(api_instance)
+                if not method.startswith("_")
+                and callable(getattr(api_instance, method))
             ]
             apis[api_name] = methods
         return apis
@@ -110,7 +112,9 @@ class NATSRouter:
         logger.info("Listing available APIs and methods")
         return await self.list_available_apis()
 
-    async def _handle_dynamic_api_command(self, target: str, **params) -> dict[str, Any]:
+    async def _handle_dynamic_api_command(
+        self, target: str, **params
+    ) -> dict[str, Any]:
         """
         Handle dynamic API commands in format: api_class.method_name
 
@@ -126,24 +130,32 @@ class NATSRouter:
         try:
             # Parse target string (e.g., "employees.get_employee")
             if "." not in target:
-                return {"error": f"Invalid target format. Use 'api_class.method_name'. Got: {target}"}
+                return {
+                    "error": f"Invalid target format. Use 'api_class.method_name'. Got: {target}"
+                }
 
             api_name, method_name = target.split(".", 1)
 
             # Get API instance
             if api_name not in self.api_map:
                 available_apis = list(self.api_map.keys())
-                return {"error": f"Unknown API: {api_name}. Available APIs: {available_apis}"}
+                return {
+                    "error": f"Unknown API: {api_name}. Available APIs: {available_apis}"
+                }
 
             api_instance = self.api_map[api_name]
 
             # Get method from API instance
             if not hasattr(api_instance, method_name):
                 available_methods = [
-                    method for method in dir(api_instance)
-                    if not method.startswith('_') and callable(getattr(api_instance, method))
+                    method
+                    for method in dir(api_instance)
+                    if not method.startswith("_")
+                    and callable(getattr(api_instance, method))
                 ]
-                return {"error": f"Unknown method: {method_name} on {api_name}. Available methods: {available_methods}"}
+                return {
+                    "error": f"Unknown method: {method_name} on {api_name}. Available methods: {available_methods}"
+                }
 
             method = getattr(api_instance, method_name)
 
@@ -207,7 +219,7 @@ class NATSRouter:
 
 
 async def setup_nats_router(
-    okc_client: Client,
+    okc_client: OKC,
 ) -> NATSRouter:
     """Setup and configure NATS router"""
     router = NATSRouter(

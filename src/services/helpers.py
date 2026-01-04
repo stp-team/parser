@@ -42,18 +42,6 @@ def get_week_start_date() -> datetime:
     return monday_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def get_week_end_date() -> datetime:
-    """
-    Возвращает конец недели (воскресенье) для парсинга KPI.
-
-    Returns:
-        datetime объект с концом недели (воскресенье)
-    """
-    monday = get_week_start_date()
-    sunday = monday + timedelta(days=6)
-    return sunday.replace(hour=23, minute=59, second=59, microsecond=999999)
-
-
 def get_month_period_for_kpi() -> datetime:
     """
     Возвращает период месяца для парсинга KPI.
@@ -87,47 +75,3 @@ def get_month_period_for_kpi() -> datetime:
     else:
         # С 4-го числа парсим текущий месяц
         return get_current_month_first_day()
-
-
-def calculate_days_in_week_period() -> int:
-    """
-    Вычисляет количество дней для парсинга недельного периода.
-
-    Returns:
-        Количество дней для недельного периода (всегда 7 для полной недели)
-    """
-    # Для недельных KPI всегда используем 7 дней
-    return 7
-
-
-def calculate_days_in_month_period() -> int:
-    """
-    Вычисляет количество дней для парсинга месячного периода.
-
-    Returns:
-        Количество дней в месяце для парсинга
-    """
-    current_date = datetime.now()
-    month_period = get_month_period_for_kpi()
-
-    if current_date.day <= 3:
-        # Если парсим предыдущий месяц, берем все дни предыдущего месяца
-        if month_period.month == 12:
-            # Декабрь
-            return 31
-        elif month_period.month in [1, 3, 5, 7, 8, 10]:
-            # Месяцы с 31 днем
-            return 31
-        elif month_period.month in [4, 6, 9, 11]:
-            # Месяцы с 30 днями
-            return 30
-        else:
-            # Февраль
-            year = month_period.year
-            if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
-                return 29  # Високосный год
-            else:
-                return 28
-    else:
-        # Парсим текущий месяц до текущей даты
-        return current_date.day

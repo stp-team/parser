@@ -9,25 +9,24 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from okc_py import Client
+from okc_py import OKC
 
-from app.core.config import settings
-from app.tasks.employees.employees import (
+from src.core.config import settings
+from src.tasks.employees import (
     fill_birthdays,
     fill_employee_ids,
     fill_employment_dates,
-    fill_tutors,
 )
-from app.tasks.kpi.kpi import fill_day_kpi, fill_month_kpi, fill_week_kpi
-from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
-from app.tasks.tests.tests import fill_current_tests
-from app.tasks.tutors.tutors import fill_tutor_schedule
+from src.tasks.kpi import fill_day_kpi, fill_month_kpi, fill_week_kpi
+from src.tasks.premium import fill_heads_premium, fill_specialists_premium
+from src.tasks.tests import fill_assigned_tests
+from src.tasks.tutors import fill_tutor_schedule
 
 
 class Scheduler:
     def __init__(
         self,
-        okc_client: Client,
+        okc_client: OKC,
         db_url: str | None = None,
         max_workers: int = 5,
     ):
@@ -103,6 +102,12 @@ class Scheduler:
                 except asyncio.TimeoutError:
                     self.logger.warning("Timeout waiting for jobs to complete")
 
+            # Close jobstore connections before shutdown to avoid event loop warnings
+            if "default" in self.scheduler._jobstores:
+                jobstore = self.scheduler._jobstores["default"]
+                if hasattr(jobstore, "engine"):
+                    await jobstore.engine.dispose()
+
             self.scheduler.shutdown(wait=wait)
             self.logger.info("Scheduler stopped successfully")
 
@@ -156,7 +161,7 @@ class Scheduler:
         )
 
         self.scheduler.add_job(
-            self._safe_job_wrapper(fill_tutors, "employees_tutors"),
+            self._safe_job_wrapper(fill_tutor_schedule, "employees_tutors"),
             trigger=IntervalTrigger(minutes=5),
             args=[self.okc_client.tutors, self.okc_client.dossier],
             id="employees_tutors",
@@ -236,7 +241,7 @@ class Scheduler:
     async def _setup_tests(self) -> None:
         """Настройка задач, связанных с тестами."""
         self.scheduler.add_job(
-            self._safe_job_wrapper(fill_current_tests, "tests_current"),
+            self._safe_job_wrapper(fill_assigned_tests, "tests_current"),
             trigger=IntervalTrigger(minutes=10),
             args=[self.okc_client.tests],
             id="tests_current",
@@ -410,8 +415,16 @@ class Scheduler:
 
     @asynccontextmanager
     async def managed_lifecycle(self):
+        shutdown_gracefully = True
         try:
             await self.start_scheduling()
             yield self
+        except asyncio.CancelledError:
+            # Task cancellation - still shutdown gracefully but don't re-raise
+            shutdown_gracefully = True
+        except Exception:
+            # Other errors - shutdown immediately
+            shutdown_gracefully = False
+            raise
         finally:
-            await self.stop_scheduling()
+            await self.stop_scheduling(wait=shutdown_gracefully)

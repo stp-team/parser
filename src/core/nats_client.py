@@ -7,7 +7,7 @@ from typing import Any
 import nats
 from nats.aio.client import Client as NATS
 
-from app.core.config import settings
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,10 @@ class NATSClient:
                             "data": result,
                             "command": command,
                         }
-                        await self.nc.publish(msg.reply, json.dumps(response, ensure_ascii=False).encode('utf-8'))
+                        await self.nc.publish(
+                            msg.reply,
+                            json.dumps(response, ensure_ascii=False).encode("utf-8"),
+                        )
                         logger.debug(f"Sent response for command {command}")
 
                 except Exception as e:
@@ -110,7 +113,10 @@ class NATSClient:
                             "command": command,
                         }
                         await self.nc.publish(
-                            msg.reply, json.dumps(error_response, ensure_ascii=False).encode('utf-8')
+                            msg.reply,
+                            json.dumps(error_response, ensure_ascii=False).encode(
+                                "utf-8"
+                            ),
                         )
             else:
                 logger.warning(f"No handler found for command: {command}")
@@ -123,7 +129,8 @@ class NATSClient:
                         "command": command,
                     }
                     await self.nc.publish(
-                        msg.reply, json.dumps(error_response, ensure_ascii=False).encode('utf-8')
+                        msg.reply,
+                        json.dumps(error_response, ensure_ascii=False).encode("utf-8"),
                     )
 
         except Exception as e:

@@ -1,20 +1,20 @@
 import asyncio
 import logging
 
-from okc_py import Client
+from okc_py import OKC
 from okc_py.config import Settings
 
-from app.core.config import settings
-from app.core.nats_client import nats_client
-from app.core.nats_router import setup_nats_router
-from app.services.logger import setup_logging
-from app.services.scheduler import Scheduler
-from app.tasks.employees.employees import fill_all_employee_data, fill_tutors
-from app.tasks.kpi.kpi import fill_kpi
-from app.tasks.premium.premium import fill_heads_premium, fill_specialists_premium
-from app.tasks.sl.sl import fill_sl
-from app.tasks.tests.tests import fill_current_tests
-from app.tasks.tutors.tutors import fill_tutor_schedule
+from src.core.config import settings
+from src.core.nats_client import nats_client
+from src.core.nats_router import setup_nats_router
+from src.services.logger import setup_logging
+from src.services.scheduler import Scheduler
+from src.tasks.employees import fill_all_employee_data
+from src.tasks.kpi import fill_kpi
+from src.tasks.premium import fill_heads_premium, fill_specialists_premium
+from src.tasks.sl import fill_sl
+from src.tasks.tests import fill_assigned_tests
+from src.tasks.tutors import fill_tutor_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +23,12 @@ async def main():
     setup_logging()
     logger.info("Запуск парсера...")
 
-    session = None
-
-    okc_client = Client(
+    okc_client = OKC(
+        username=settings.OKC_USERNAME,
+        password=settings.OKC_PASSWORD,
         settings=Settings(
             BASE_URL=settings.OKC_BASE_URL,
-            USERNAME=settings.OKC_USERNAME,
-            PASSWORD=settings.OKC_PASSWORD,
-        )
+        ),
     )
     try:
         await okc_client.connect()
@@ -73,10 +71,9 @@ async def main():
                 await fill_kpi(okc_client.ure)
                 await fill_heads_premium(okc_client.premium)
                 await fill_specialists_premium(okc_client.premium)
-                await fill_tutors(okc_client.tutors, okc_client.dossier)
                 await fill_tutor_schedule(okc_client.tutors)
                 await fill_sl(okc_client.sl)
-                await fill_current_tests(okc_client.tests)
+                await fill_assigned_tests(okc_client.tests)
                 logger.info("Получение данных при старте завершено")
 
             try:
@@ -105,9 +102,6 @@ async def main():
             logger.warning(f"Ошибка при закрытии NATS соединения: {e}")
 
         await okc_client.close()
-        if session:
-            await session.close()
-            logger.info("HTTP session closed")
 
 
 if __name__ == "__main__":

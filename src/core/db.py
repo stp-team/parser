@@ -3,9 +3,8 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from stp_database import create_engine, create_session_pool
-from stp_database.repo.STP import MainRequestsRepo
 
-from app.core.config import settings
+from src.core.config import settings
 
 # Database engines
 stp_engine = create_engine(
@@ -40,10 +39,3 @@ async def get_stats_session() -> AsyncGenerator[AsyncSession, None]:
     """Get Stats database session context manager"""
     async with stats_session_pool() as session:
         yield session
-
-
-@asynccontextmanager
-async def get_stp_repo() -> AsyncGenerator[MainRequestsRepo, None]:
-    """Get STP repository as proper async context manager"""
-    async with stp_session_pool() as session:
-        yield MainRequestsRepo(session)
