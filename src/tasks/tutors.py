@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime, timedelta
 
-from okc_py.models.tutors import ShiftPart, Trainee, Tutor
-from okc_py.repos import TutorsAPI
+from okc_py import TutorsAPI
+from okc_py.api.models.tutors import ShiftPart, Trainee, Tutor
 from sqlalchemy import Delete
 from stp_database.models.Stats import TutorsSchedule
 

@@ -2,7 +2,8 @@ import asyncio
 import logging
 from datetime import datetime
 
-from okc_py.models.ure import (
+from okc_py import UreAPI
+from okc_py.api.models.ure import (
     AHTDataRecord,
     CSIDataRecord,
     DelayDataRecord,
@@ -12,7 +13,6 @@ from okc_py.models.ure import (
     SalesDataRecord,
     SalesPotentialDataRecord,
 )
-from okc_py.repos import UreAPI
 from sqlalchemy import delete
 from sqlalchemy.orm import DeclarativeBase
 from stp_database.models.Stats import SpecDayKPI, SpecMonthKPI, SpecWeekKPI

@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from okc_py.repos import SlAPI
+from okc_py import SlAPI
 from sqlalchemy import Delete
 from stp_database.models.Stats.sl import SL
 

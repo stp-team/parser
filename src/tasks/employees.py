@@ -2,8 +2,8 @@ import asyncio
 import logging
 from datetime import datetime
 
-from okc_py.models.dossier import EmployeeInfo
-from okc_py.repos import DossierAPI, TutorsAPI
+from okc_py import DossierAPI, TutorsAPI
+from okc_py.api.models.dossier import EmployeeInfo
 from sqlalchemy import select
 from stp_database.models.STP import Employee
 
@@ -321,7 +321,7 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
         logger.info("[Employees] Starting tutor information update")
 
         # Get filters
-        graph_filters = await tutors_api.get_graph_filters(division_id=2)
+        graph_filters = await tutors_api.get_filters(division_id=2)
         if not graph_filters:
             logger.warning("[Employees] No graph filters received from API")
             return 0

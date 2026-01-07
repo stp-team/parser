@@ -2,8 +2,8 @@ import asyncio
 import logging
 from datetime import datetime
 
-from okc_py.models.premium import HeadPremiumData, SpecialistPremiumData
-from okc_py.repos import PremiumAPI
+from okc_py import PremiumAPI
+from okc_py.api.models.premium import HeadPremiumData, SpecialistPremiumData
 from sqlalchemy import Delete
 from stp_database.models.Stats import HeadPremium, SpecPremium
 

@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime
 
-from okc_py.models.tests import AssignedTest as AssignedTestModel
-from okc_py.repos import TestsAPI
+from okc_py import TestsAPI
+from okc_py.api.models.tests import AssignedTest as APIAssignedTest
 from sqlalchemy import Delete
 from stp_database.models.Stats import AssignedTest
 
@@ -26,7 +26,7 @@ async def fetch_assigned_tests(
     api: TestsAPI,
     start_date: str,
     stop_date: str,
-) -> list[AssignedTestModel] | None:
+) -> list[APIAssignedTest] | None:
     """Fetch assigned tests from API."""
     return await api.get_assigned_tests(
         start_date=start_date,
@@ -35,23 +35,28 @@ async def fetch_assigned_tests(
     )
 
 
-def map_assigned_test(api_test: AssignedTestModel) -> AssignedTest:
-    """Map Pydantic model to DB model - direct field access."""
-    test = AssignedTest()
-    test.test_id = int(api_test.id) if api_test.id else None
-    test.test_name = api_test.test_name
-    test.employee_fullname = api_test.user_name
-    test.head_fullname = api_test.head_name
-    test.creator_fullname = api_test.creator_name
-    test.status = api_test.status_name
+def create_db_test(
+    api_test: APIAssignedTest, extraction_period: datetime
+) -> AssignedTest:
+    """Create SQLAlchemy model from Pydantic API model."""
+    # Parse datetime - format can be "DD.MM.YYYY" or "DD.MM.YYYY HH:MM:SS"
+    active_from_str = api_test.active_from.strip()
+    try:
+        active_from = datetime.strptime(active_from_str, "%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        active_from = datetime.strptime(active_from_str, "%d.%m.%Y")
 
-    if api_test.active_from:
-        try:
-            test.extraction_period = datetime.strptime(api_test.active_from, "%d.%m.%Y")
-        except ValueError:
-            test.extraction_period = datetime.now()
-
-    return test
+    return AssignedTest(
+        test_id=int(api_test.id),
+        test_name=api_test.test_name,
+        employee_fullname=api_test.user_name,
+        head_fullname=api_test.head_name,
+        creator_fullname=api_test.creator_name,
+        status=api_test.status_name,
+        active_from=active_from,
+        extraction_period=extraction_period,
+        created_at=datetime.now(),
+    )
 
 
 async def save_assigned_tests(tests: list[AssignedTest]) -> int:
@@ -94,12 +99,12 @@ async def fill_assigned_tests(
 
         logger.info(f"[Tests] Retrieved {len(api_tests)} assigned tests from API")
 
-        # Map
-        tests = [map_assigned_test(t) for t in api_tests]
-        logger.info(f"[Tests] Mapped {len(tests)} test records")
+        # Map API models to DB models
+        extraction_period = datetime.strptime(stop_date, "%d.%m.%Y")
+        db_tests = [create_db_test(test, extraction_period) for test in api_tests]
 
         # Save
-        count = await save_assigned_tests(tests)
+        count = await save_assigned_tests(db_tests)
         logger.info(f"[Tests] Completed: {count} records saved")
         return count
 

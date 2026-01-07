@@ -1,4 +1,7 @@
+import json
+
 import pytz
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pytz.tzinfo import DstTzInfo
 
@@ -25,6 +28,25 @@ class Settings(BaseSettings):
     NATS_PORT: int = 4222
     NATS_TOKEN: str = ""
     NATS_SUBJECT: str = "api_test"
+
+    # Настройки WebSocket
+    WS_LINES: list[str] = [
+        "nck",
+        "ntp1",
+        "ntp2",
+    ]  # Линии для подключения: nck, ntp1, ntp2
+
+    @field_validator("WS_LINES", mode="before")
+    @classmethod
+    def parse_ws_lines(cls, v):
+        """Parse WS_LINES from JSON string or list."""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # If comma-separated string
+                return [line.strip() for line in v.split(",")]
+        return v
 
     # Настройки планировщика
     SCHEDULER_ENABLE_PERSISTENCE: bool = False
