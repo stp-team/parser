@@ -331,7 +331,7 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
 
         current_month = date.today().strftime("%Y-%m")
         previous_months = PeriodHelper.get_previous_months(6)
-        months = [current_month] + previous_months
+        months = previous_months + [current_month]
 
         first_period = months[0]
         last_period = months[-1]
@@ -363,16 +363,35 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
 
         # Create tutor lookup
         tutors_dict = {}
+        subtype_stats = {"with_subtype": 0, "without_subtype": 0}
         for tutor in tutor_graph.tutors:
             ti = tutor.tutor_info
+            logger.debug(
+                f"[Employees] Tutor info - Name: {ti.full_name}, "
+                f"ID: {ti.employee_id}, "
+                f"Type: {ti.tutor_type}, "
+                f"Subtype: {ti.tutor_subtype}"
+            )
+            if ti.tutor_subtype:
+                subtype_stats["with_subtype"] += 1
+            else:
+                subtype_stats["without_subtype"] += 1
+
             tutors_dict[ti.full_name] = {
                 "employee_id": ti.employee_id,
                 "tutor_type": ti.tutor_type,
                 "tutor_subtype": ti.tutor_subtype,
             }
 
+        logger.info(
+            f"[Employees] Tutor subtype stats: "
+            f"{subtype_stats['with_subtype']} with subtype, "
+            f"{subtype_stats['without_subtype']} without subtype"
+        )
+
         # Update employees in DB
         updated_count = 0
+        not_found_count = 0
         async with get_stp_session() as session:
             for fullname, tutor_info in tutors_dict.items():
                 stmt = select(Employee).where(Employee.fullname == fullname)
@@ -384,11 +403,24 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
                     db_emp.is_tutor = True
                     db_emp.tutor_type = tutor_info["tutor_type"]
                     db_emp.tutor_subtype = tutor_info["tutor_subtype"]
+
+                    logger.debug(
+                        f"[Employees] Updated tutor {fullname}: "
+                        f"subtype={tutor_info['tutor_subtype']}, "
+                        f"type={tutor_info['tutor_type']}, "
+                        f"employee_id={tutor_info['employee_id']}"
+                    )
                     updated_count += 1
+                else:
+                    not_found_count += 1
+                    logger.debug(f"[Employees] Employee not found in DB: {fullname}")
 
             await session.commit()
 
-        logger.info(f"[Employees] Updated {updated_count} tutor records")
+        logger.info(
+            f"[Employees] Updated {updated_count} tutor records "
+            f"({not_found_count} tutors not found in DB)"
+        )
         return updated_count
 
     return await _update()
@@ -412,11 +444,6 @@ async def fill_employment_dates(dossier_api: DossierAPI) -> int:
 async def fill_employee_ids(dossier_api: DossierAPI) -> int:
     """Fill employee IDs."""
     return await update_employee_ids(dossier_api)
-
-
-async def fill_all_employee_data(dossier_api: DossierAPI) -> int:
-    """Fill all employee data."""
-    return await update_all_employee_data(dossier_api)
 
 
 async def fill_tutor_info(tutors_api: TutorsAPI) -> int:

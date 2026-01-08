@@ -10,7 +10,7 @@ from src.core.nats_router import setup_nats_router
 from src.core.ws_bridge import cleanup_ws_bridges, setup_ws_bridges
 from src.services.logger import setup_logging
 from src.services.scheduler import Scheduler
-from src.tasks.employees import fill_all_employee_data
+from src.tasks.employees import fill_employees
 from src.tasks.premium import fill_heads_premium, fill_specialists_premium
 from src.tasks.sl import fill_sl
 from src.tasks.tests import fill_assigned_tests
@@ -47,7 +47,9 @@ async def main():
                     okc_client=okc_client,
                     lines=settings.WS_LINES,
                 )
-                logger.info(f"WebSocket bridges настроены для линий: {settings.WS_LINES}")
+                logger.info(
+                    f"WebSocket bridges настроены для линий: {settings.WS_LINES}"
+                )
             except Exception as e:
                 logger.warning(f"Не удалось настроить WebSocket bridges: {e}")
 
@@ -79,7 +81,7 @@ async def main():
             if settings.ENVIRONMENT != "dev":
                 # Заполнение данных при старте
                 logger.info("Запуск получения данных при старте парсера...")
-                await fill_all_employee_data(okc_client.dossier)
+                await fill_employees(okc_client.dossier, okc_client.tutors)
                 await fill_kpi(okc_client.ure)
                 await fill_heads_premium(okc_client.premium)
                 await fill_specialists_premium(okc_client.premium)
