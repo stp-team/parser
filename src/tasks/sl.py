@@ -1,14 +1,47 @@
-import asyncio
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 from okc_py import SlAPI
-from sqlalchemy import Delete
+from sqlalchemy import delete
 from stp_database.models.Stats.sl import SL
 
 from src.core.db import get_stats_session
+from src.tasks.base import ConcurrentAPIFetcher, log_processing_time
 
 logger = logging.getLogger(__name__)
+
+
+def get_default_periods() -> list[tuple[str, str]]:
+    """Get default periods (yesterday to today)."""
+    yesterday = datetime.now() - timedelta(days=1)
+    today = datetime.now()
+    return [(yesterday.strftime("%d.%m.%Y"), today.strftime("%d.%m.%Y"))]
+
+
+def create_sl_object(result: Any, extraction_date: datetime) -> SL | None:
+    """Create SL object from API result."""
+    if not result or not result.total_data:
+        return None
+
+    sl = SL()
+    sl.extraction_period = extraction_date
+    td = result.total_data
+
+    sl.received_contacts = td.total_entered
+    sl.accepted_contacts = td.total_answered
+    sl.missed_contacts = td.total_abandoned
+    sl.sl_contacts = td.answered_in_sl
+    sl.accepted_contacts_percent = td.answered_percent
+
+    if result.detail_data.data:
+        first_row = result.detail_data.data[0]
+        sl.sl = first_row.sl
+        sl.average_proc_time = first_row.average_release_time
+        if td.total_entered > 0:
+            sl.missed_contacts_percent = (td.total_abandoned / td.total_entered) * 100
+
+    return sl
 
 
 async def fill_sl(
@@ -18,9 +51,7 @@ async def fill_sl(
     logger.info("[SL] Starting Service Level data update")
 
     if periods is None:
-        yesterday = datetime.now() - timedelta(days=1)
-        today = datetime.now()
-        periods = [(yesterday.strftime("%d.%m.%Y"), today.strftime("%d.%m.%Y"))]
+        periods = get_default_periods()
 
     if units is None:
         units = [7]
@@ -43,40 +74,20 @@ async def fill_sl(
         )
 
     logger.info(f"[SL] Fetching SL data for {len(periods)} periods")
-    results = await asyncio.gather(
-        *[fetch(s, e) for s, e in periods], return_exceptions=True
-    )
+    fetcher = ConcurrentAPIFetcher(semaphore_limit=5)
+    results = await fetcher.fetch_parallel(periods, fetch)
 
-    # Create SL objects - direct field mapping!
+    # Create SL objects using helper
     sl_objects = []
-    for (start, _), result in zip(periods, results, strict=True):
-        if isinstance(result, Exception) or result is None:
+    for (start, _), result in results:
+        if result is None:
             logger.warning(f"[SL] No data for period starting {start}")
             continue
 
-        sl = SL()
-        sl.extraction_period = datetime.strptime(start, "%d.%m.%Y")
-
-        # Direct field access from Pydantic model - NO MAPPING NEEDED!
-        td = result.total_data
-        sl.received_contacts = td.total_entered
-        sl.accepted_contacts = td.total_answered
-        sl.missed_contacts = td.total_abandoned
-        sl.sl_contacts = td.answered_in_sl
-        sl.accepted_contacts_percent = td.answered_percent
-
-        # Get additional fields from detail_data (first row contains summary)
-        if result.detail_data.data:
-            first_row = result.detail_data.data[0]
-            sl.sl = first_row.sl
-            sl.average_proc_time = first_row.average_release_time
-            # Calculate missed percent from totals
-            if td.total_entered > 0:
-                sl.missed_contacts_percent = (
-                    td.total_abandoned / td.total_entered
-                ) * 100
-
-        sl_objects.append(sl)
+        extraction_date = datetime.strptime(start, "%d.%m.%Y")
+        sl = create_sl_object(result, extraction_date)
+        if sl:
+            sl_objects.append(sl)
 
     if not sl_objects:
         logger.warning("[SL] No SL data to save")
@@ -84,13 +95,12 @@ async def fill_sl(
 
     logger.info(f"[SL] Mapped {len(sl_objects)} SL records")
 
-    # Save
+    # Save with optimized deletion
     async with get_stats_session() as session:
         logger.info("[SL] Deleting old SL data and inserting new records")
-        for sl in sl_objects:
-            await session.execute(
-                Delete(SL).where(SL.extraction_period == sl.extraction_period)
-            )
+        unique_periods = set(sl.extraction_period for sl in sl_objects)
+        for period in unique_periods:
+            await session.execute(delete(SL).where(SL.extraction_period == period))
         session.add_all(sl_objects)
         await session.commit()
 
@@ -98,12 +108,7 @@ async def fill_sl(
     return len(sl_objects)
 
 
+@log_processing_time("SL data processing for specific periods")
 async def fill_sl_for_periods(api: SlAPI, periods: list[tuple[str, str]]) -> int:
     """Fill SL data for specific periods."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("SL data processing for specific periods")
-    async def _fill():
-        return await fill_sl(api, periods=periods)
-
-    return await _fill()
+    return await fill_sl(api, periods=periods)

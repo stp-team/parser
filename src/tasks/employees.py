@@ -1,6 +1,6 @@
-import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from okc_py import DossierAPI, TutorsAPI
 from okc_py.api.models.dossier import EmployeeInfo
@@ -8,427 +8,335 @@ from sqlalchemy import select
 from stp_database.models.STP import Employee
 
 from src.core.db import get_stp_session
+from src.tasks.base import ConcurrentAPIFetcher, PeriodHelper, log_processing_time
 
 logger = logging.getLogger(__name__)
 
 
-# ==============================================================================
-# EMPLOYEE DATA UPDATES (using DossierAPI)
-# ==============================================================================
+def parse_date(date_str: str | None) -> datetime | None:
+    """Parse date string in DD.MM.YYYY format."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%d.%m.%Y")
+    except ValueError:
+        return None
 
 
+async def find_employee_by_fullname(session, fullname: str) -> Employee | None:
+    """Find employee by fullname in database."""
+    stmt = select(Employee).where(Employee.fullname == fullname)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def fetch_employee_details_concurrent(
+    dossier_api: DossierAPI,
+    employees: list[Any],
+    semaphore_limit: int = 10,
+    **api_kwargs,
+) -> list:
+    """Fetch employee details concurrently using ConcurrentAPIFetcher."""
+
+    async def fetch_detail(fullname: str):
+        return await dossier_api.get_employee(employee_fullname=fullname, **api_kwargs)
+
+    tasks = [(e.fullname,) for e in employees if hasattr(e, "fullname") and e.fullname]
+    fetcher = ConcurrentAPIFetcher(semaphore_limit=semaphore_limit)
+    results = await fetcher.fetch_parallel(tasks, fetch_detail)
+    return [result for _, result in results if result is not None]
+
+
+@log_processing_time("Employee birthdays update")
 async def update_birthdays(dossier_api: DossierAPI) -> int:
     """Update employee birthdays from DossierAPI."""
-    from src.tasks.base import log_processing_time
+    logger.info("[Employees] Starting employee birthdays update")
+    employees_data = await dossier_api.get_employees(exclude_fired=True)
+    if not employees_data:
+        logger.warning("[Employees] No employees data received from API")
+        return 0
 
-    @log_processing_time("Employee birthdays update")
-    async def _update():
-        logger.info("[Employees] Starting employee birthdays update")
-        employees_data = await dossier_api.get_employees(exclude_fired=True)
-        if not employees_data:
-            logger.warning("[Employees] No employees data received from API")
-            return 0
+    logger.info(f"[Employees] Processing {len(employees_data)} employees")
 
-        logger.info(f"[Employees] Processing {len(employees_data)} employees")
+    updated_count = 0
+    async with get_stp_session() as session:
+        for emp_pydantic in employees_data:
+            if not emp_pydantic.fullname:
+                continue
 
-        updated_count = 0
-        async with get_stp_session() as session:
-            for emp_pydantic in employees_data:
-                if not emp_pydantic.fullname:
-                    continue
+            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
+            if db_emp and emp_pydantic.fired_date:
+                db_emp.fired_date = parse_date(emp_pydantic.fired_date)
+                updated_count += 1
 
-                # Find employee in DB
-                stmt = select(Employee).where(
-                    Employee.fullname == emp_pydantic.fullname
-                )
-                result = await session.execute(stmt)
-                db_emp = result.scalar_one_or_none()
+        await session.commit()
 
-                if db_emp:
-                    if emp_pydantic.fired_date:
-                        try:
-                            db_emp.fired_date = datetime.strptime(
-                                emp_pydantic.fired_date, "%d.%m.%Y"
-                            )
-                        except ValueError:
-                            pass
-                    updated_count += 1
-
-            await session.commit()
-
-        logger.info(f"[Employees] Updated {updated_count} employee records")
-        return updated_count
-
-    return await _update()
+    logger.info(f"[Employees] Updated {updated_count} employee records")
+    return updated_count
 
 
+@log_processing_time("Employee employment dates update")
 async def update_employment_dates(dossier_api: DossierAPI) -> int:
     """Update employee employment dates from DossierAPI - concurrent API calls."""
-    from src.tasks.base import log_processing_time
+    logger.info("[Employees] Starting employee employment dates update")
+    employees_data = await dossier_api.get_employees(exclude_fired=True)
+    if not employees_data:
+        logger.warning("[Employees] No employees data received from API")
+        return 0
 
-    @log_processing_time("Employee employment dates update")
-    async def _update():
-        logger.info("[Employees] Starting employee employment dates update")
-        employees_data = await dossier_api.get_employees(exclude_fired=True)
-        if not employees_data:
-            logger.warning("[Employees] No employees data received from API")
-            return 0
+    valid_employees = [e for e in employees_data if e.fullname]
+    logger.info(f"[Employees] Fetching details for {len(valid_employees)} employees")
 
-        valid_employees = [e for e in employees_data if e.fullname]
-        logger.info(
-            f"[Employees] Fetching details for {len(valid_employees)} employees"
-        )
+    emp_details = await fetch_employee_details_concurrent(
+        dossier_api, valid_employees, semaphore_limit=10
+    )
 
-        # Fetch all employee details concurrently
-        semaphore = asyncio.Semaphore(10)
+    updated_count = 0
+    async with get_stp_session() as session:
+        for emp_pydantic, emp_detail in zip(valid_employees, emp_details, strict=True):
+            if not emp_detail or not emp_detail.employeeInfo:
+                continue
 
-        async def fetch_employee_detail(fullname: str):
-            async with semaphore:
-                return await dossier_api.get_employee(employee_fullname=fullname)
+            info = emp_detail.employeeInfo
+            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
 
-        tasks = [fetch_employee_detail(e.fullname) for e in valid_employees]
-        emp_details = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
-        updated_count = 0
-        async with get_stp_session() as session:
-            for emp_pydantic, emp_detail in zip(
-                valid_employees, emp_details, strict=True
-            ):
-                if isinstance(emp_detail, Exception):
-                    continue
-                if not emp_detail or not emp_detail.employeeInfo:
-                    continue
-
-                info = emp_detail.employeeInfo
-
-                # Find employee in DB
-                stmt = select(Employee).where(
-                    Employee.fullname == emp_pydantic.fullname
-                )
-                result = await session.execute(stmt)
-                db_emp = result.scalar_one_or_none()
-
-                if db_emp and info.employment_date:
-                    try:
-                        db_emp.employment_date = datetime.strptime(
-                            info.employment_date, "%d.%m.%Y"
-                        )
-                        updated_count += 1
-                    except ValueError:
-                        pass
-
-            await session.commit()
-
-        logger.info(f"[Employees] Updated {updated_count} employment dates")
-        return updated_count
-
-    return await _update()
-
-
-async def update_employee_ids(dossier_api: DossierAPI) -> int:
-    """Update employee IDs from DossierAPI - concurrent API calls."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("Employee IDs update")
-    async def _update():
-        logger.info("[Employees] Starting employee IDs update")
-        employees_data = await dossier_api.get_employees(exclude_fired=True)
-        if not employees_data:
-            logger.warning("[Employees] No employees data received from API")
-            return 0
-
-        valid_employees = [e for e in employees_data if e.fullname]
-        logger.info(
-            f"[Employees] Fetching details for {len(valid_employees)} employees"
-        )
-
-        # Fetch all employee details concurrently
-        semaphore = asyncio.Semaphore(10)
-
-        async def fetch_employee_detail(fullname: str):
-            async with semaphore:
-                return await dossier_api.get_employee(employee_fullname=fullname)
-
-        tasks = [fetch_employee_detail(e.fullname) for e in valid_employees]
-        emp_details = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
-        updated_count = 0
-        async with get_stp_session() as session:
-            for emp_pydantic, emp_detail in zip(
-                valid_employees, emp_details, strict=True
-            ):
-                if isinstance(emp_detail, Exception):
-                    continue
-                if not emp_detail or not emp_detail.employeeInfo:
-                    continue
-
-                info = emp_detail.employeeInfo
-
-                # Find employee in DB
-                stmt = select(Employee).where(
-                    Employee.fullname == emp_pydantic.fullname
-                )
-                result = await session.execute(stmt)
-                db_emp = result.scalar_one_or_none()
-
-                if db_emp:
-                    db_emp.employee_id = info.id
+            if db_emp and info.employment_date:
+                db_emp.employment_date = parse_date(info.employment_date)
+                if db_emp.employment_date:
                     updated_count += 1
 
-            await session.commit()
+        await session.commit()
 
-        logger.info(f"[Employees] Updated {updated_count} employee IDs")
-        return updated_count
-
-    return await _update()
+    logger.info(f"[Employees] Updated {updated_count} employment dates")
+    return updated_count
 
 
+@log_processing_time("Employee IDs update")
+async def update_employee_ids(dossier_api: DossierAPI) -> int:
+    """Update employee IDs from DossierAPI - concurrent API calls."""
+    logger.info("[Employees] Starting employee IDs update")
+    employees_data = await dossier_api.get_employees(exclude_fired=True)
+    if not employees_data:
+        logger.warning("[Employees] No employees data received from API")
+        return 0
+
+    valid_employees = [e for e in employees_data if e.fullname]
+    logger.info(f"[Employees] Fetching details for {len(valid_employees)} employees")
+
+    emp_details = await fetch_employee_details_concurrent(
+        dossier_api, valid_employees, semaphore_limit=10
+    )
+
+    updated_count = 0
+    async with get_stp_session() as session:
+        for emp_pydantic, emp_detail in zip(valid_employees, emp_details, strict=True):
+            if not emp_detail or not emp_detail.employeeInfo:
+                continue
+
+            info = emp_detail.employeeInfo
+            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
+
+            if db_emp:
+                db_emp.employee_id = int(info.id) if info.id else None
+                updated_count += 1
+
+        await session.commit()
+
+    logger.info(f"[Employees] Updated {updated_count} employee IDs")
+    return updated_count
+
+
+@log_processing_time("All employee data update")
 async def update_all_employee_data(dossier_api: DossierAPI) -> int:
     """Update all employee data (birthdays, employment dates, IDs) - only for employees missing data."""
-    from src.tasks.base import log_processing_time
+    logger.info("[Employees] Starting comprehensive employee data update")
 
-    @log_processing_time("All employee data update")
-    async def _update():
-        logger.info("[Employees] Starting comprehensive employee data update")
-
-        # Step 1: Get employees from database that are missing employment_date or birthday
-        async with get_stp_session() as session:
-            stmt = select(Employee).where(
-                (Employee.employment_date.is_(None)) | (Employee.birthday.is_(None))
-            )
-            result = await session.execute(stmt)
-            db_employees_needing_update = result.scalars().all()
-
-        if not db_employees_needing_update:
-            logger.info("[Employees] No employees missing employment_date or birthday")
-            return 0
-
-        logger.info(
-            f"[Employees] Found {len(db_employees_needing_update)} employees missing data in database"
+    # Step 1: Get employees from database that are missing employment_date or birthday
+    async with get_stp_session() as session:
+        stmt = select(Employee).where(
+            (Employee.employment_date.is_(None)) | (Employee.birthday.is_(None))
         )
+        result = await session.execute(stmt)
+        db_employees_needing_update = result.scalars().all()
 
-        # Step 2: Get all employees from API
-        employees_data = await dossier_api.get_employees(exclude_fired=True)
-        if not employees_data:
-            logger.warning("[Employees] No employees data received from DossierAPI")
-            return 0
+    if not db_employees_needing_update:
+        logger.info("[Employees] No employees missing employment_date or birthday")
+        return 0
 
-        logger.info(f"[Employees] Retrieved {len(employees_data)} employees from API")
+    logger.info(
+        f"[Employees] Found {len(db_employees_needing_update)} employees missing data in database"
+    )
 
-        # Step 3: Match by fullname
-        api_employees_by_fullname = {
-            e.fullname: e for e in employees_data if e.fullname
-        }
+    # Step 2: Get all employees from API
+    employees_data = await dossier_api.get_employees(exclude_fired=True)
+    if not employees_data:
+        logger.warning("[Employees] No employees data received from DossierAPI")
+        return 0
 
-        # Find matches
-        matched_employees = []
-        for db_emp in db_employees_needing_update:
-            if db_emp.fullname in api_employees_by_fullname:
-                matched_employees.append(
-                    (db_emp, api_employees_by_fullname[db_emp.fullname])
-                )
+    logger.info(f"[Employees] Retrieved {len(employees_data)} employees from API")
 
-        logger.info(
-            f"[Employees] Matched {len(matched_employees)} employees between DB and API"
-        )
+    # Step 3: Match by fullname
+    api_employees_by_fullname = {e.fullname: e for e in employees_data if e.fullname}
+    matched_employees = [
+        (db_emp, api_employees_by_fullname[db_emp.fullname])
+        for db_emp in db_employees_needing_update
+        if db_emp.fullname in api_employees_by_fullname
+    ]
 
-        if not matched_employees:
-            return 0
+    logger.info(
+        f"[Employees] Matched {len(matched_employees)} employees between DB and API"
+    )
 
-        # Step 4: Fetch detailed data only for matched employees (concurrently)
-        semaphore = asyncio.Semaphore(20)
+    if not matched_employees:
+        return 0
 
-        async def fetch_employee_detail(fullname: str):
-            async with semaphore:
-                return await dossier_api.get_employee(
-                    employee_fullname=fullname,
-                    show_kpi=False,
-                    show_criticals=False,
-                )
+    # Step 4: Fetch detailed data only for matched employees (concurrently)
+    logger.info(
+        f"[Employees] Fetching details for {len(matched_employees)} matched employees..."
+    )
+    api_employees_list = [api_emp for _, api_emp in matched_employees]
+    emp_details = await fetch_employee_details_concurrent(
+        dossier_api,
+        api_employees_list,
+        semaphore_limit=20,
+        show_kpi=False,
+        show_criticals=False,
+    )
 
-        logger.info(
-            f"[Employees] Fetching details for {len(matched_employees)} matched employees..."
-        )
-        tasks = [
-            fetch_employee_detail(api_emp.fullname) for _, api_emp in matched_employees
-        ]
-        emp_details = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Step 5: Update database
-        updated_count = 0
-        async with get_stp_session() as session:
-            for (db_emp, api_emp), emp_detail in zip(
-                matched_employees, emp_details, strict=True
-            ):
+    # Step 5: Update database
+    updated_count = 0
+    async with get_stp_session() as session:
+        for (db_emp, api_emp), emp_detail in zip(
+            matched_employees, emp_details, strict=True
+        ):
+            if not emp_detail or not emp_detail.employeeInfo:
                 if isinstance(emp_detail, Exception):
                     logger.warning(
                         f"[Employees] Error fetching {api_emp.fullname}: {emp_detail}"
                     )
-                    continue
+                continue
 
-                if not emp_detail or not emp_detail.employeeInfo:
-                    continue
+            info: EmployeeInfo = emp_detail.employeeInfo
+            db_emp = await find_employee_by_fullname(session, db_emp.fullname)
 
-                info: EmployeeInfo = emp_detail.employeeInfo
+            if db_emp:
+                db_emp.employee_id = int(info.id) if info.id else None
+                db_emp.employment_date = parse_date(info.employment_date)
+                db_emp.birthday = parse_date(info.birthday)
+                updated_count += 1
 
-                # Refresh db_emp from session
-                stmt = select(Employee).where(Employee.fullname == db_emp.fullname)
-                result = await session.execute(stmt)
-                db_emp = result.scalar_one_or_none()
+        await session.commit()
 
-                if db_emp:
-                    # Update all fields
-                    db_emp.employee_id = info.id
-                    if info.employment_date:
-                        try:
-                            db_emp.employment_date = datetime.strptime(
-                                info.employment_date, "%d.%m.%Y"
-                            )
-                        except ValueError:
-                            pass
-                    if info.birthday:
-                        try:
-                            db_emp.birthday = datetime.strptime(
-                                info.birthday, "%d.%m.%Y"
-                            )
-                        except ValueError:
-                            pass
-                    updated_count += 1
-
-            await session.commit()
-
-        logger.info(
-            f"[Employees] Updated {updated_count} employee records with all data"
-        )
-        return updated_count
-
-    return await _update()
+    logger.info(f"[Employees] Updated {updated_count} employee records with all data")
+    return updated_count
 
 
-# ==============================================================================
-# TUTOR INFO UPDATES (using TutorsAPI)
-# ==============================================================================
-
-
+@log_processing_time("Tutor information update")
 async def update_tutor_info(tutors_api: TutorsAPI) -> int:
     """Update tutor information from TutorsAPI."""
-    from src.tasks.base import PeriodHelper, log_processing_time
+    from datetime import date
 
-    @log_processing_time("Tutor information update")
-    async def _update():
-        logger.info("[Employees] Starting tutor information update")
+    logger.info("[Employees] Starting tutor information update")
 
-        # Get filters
-        graph_filters = await tutors_api.get_filters(division_id=2)
-        if not graph_filters:
-            logger.warning("[Employees] No graph filters received from API")
-            return 0
+    # Get filters
+    graph_filters = await tutors_api.get_filters(division_id=2)
+    if not graph_filters:
+        logger.warning("[Employees] No graph filters received from API")
+        return 0
 
-        # Get period range (include current month)
-        from datetime import date
+    # Get period range (include current month)
+    current_month = date.today().strftime("%Y-%m")
+    previous_months = PeriodHelper.get_previous_months(6)
+    months = previous_months + [current_month]
 
-        current_month = date.today().strftime("%Y-%m")
-        previous_months = PeriodHelper.get_previous_months(6)
-        months = previous_months + [current_month]
+    first_period = months[0]
+    last_period = months[-1]
 
-        first_period = months[0]
-        last_period = months[-1]
+    start_date, _ = PeriodHelper.get_date_range_for_period(first_period)
+    _, end_date = PeriodHelper.get_date_range_for_period(last_period)
 
-        start_date, _ = PeriodHelper.get_date_range_for_period(first_period)
-        _, end_date = PeriodHelper.get_date_range_for_period(last_period)
+    logger.info(f"[Employees] Fetching tutor data from {start_date} to {end_date}")
 
-        logger.info(f"[Employees] Fetching tutor data from {start_date} to {end_date}")
+    # Get all tutors
+    picked_units = [u.id for u in graph_filters.units]
+    picked_tutor_types = [t.id for t in graph_filters.tutor_types]
+    picked_shift_types = [s.id for s in graph_filters.shift_types]
 
-        # Get all tutors
-        picked_units = [u.id for u in graph_filters.units]
-        picked_tutor_types = [t.id for t in graph_filters.tutor_types]
-        picked_shift_types = [s.id for s in graph_filters.shift_types]
+    tutor_graph = await tutors_api.get_full_graph(
+        division_id=2,
+        start_date=start_date,
+        stop_date=end_date,
+        picked_units=picked_units,
+        picked_tutor_types=picked_tutor_types,
+        picked_shift_types=picked_shift_types,
+    )
 
-        tutor_graph = await tutors_api.get_full_graph(
-            division_id=2,
-            start_date=start_date,
-            stop_date=end_date,
-            picked_units=picked_units,
-            picked_tutor_types=picked_tutor_types,
-            picked_shift_types=picked_shift_types,
+    if not tutor_graph or not tutor_graph.tutors:
+        logger.warning("[Employees] No tutor data received from API")
+        return 0
+
+    logger.info(f"[Employees] Retrieved {len(tutor_graph.tutors)} tutors from API")
+
+    # Create tutor lookup
+    tutors_dict = {}
+    subtype_stats = {"with_subtype": 0, "without_subtype": 0}
+    for tutor in tutor_graph.tutors:
+        ti = tutor.tutor_info
+        logger.debug(
+            f"[Employees] Tutor info - Name: {ti.full_name}, "
+            f"ID: {ti.employee_id}, "
+            f"Type: {ti.tutor_type}, "
+            f"Subtype: {ti.tutor_subtype}"
         )
+        if ti.tutor_subtype:
+            subtype_stats["with_subtype"] += 1
+        else:
+            subtype_stats["without_subtype"] += 1
 
-        if not tutor_graph or not tutor_graph.tutors:
-            logger.warning("[Employees] No tutor data received from API")
-            return 0
+        tutors_dict[ti.full_name] = {
+            "employee_id": ti.employee_id,
+            "tutor_type": ti.tutor_type,
+            "tutor_subtype": ti.tutor_subtype,
+        }
 
-        logger.info(f"[Employees] Retrieved {len(tutor_graph.tutors)} tutors from API")
+    logger.info(
+        f"[Employees] Tutor subtype stats: "
+        f"{subtype_stats['with_subtype']} with subtype, "
+        f"{subtype_stats['without_subtype']} without subtype"
+    )
 
-        # Create tutor lookup
-        tutors_dict = {}
-        subtype_stats = {"with_subtype": 0, "without_subtype": 0}
-        for tutor in tutor_graph.tutors:
-            ti = tutor.tutor_info
-            logger.debug(
-                f"[Employees] Tutor info - Name: {ti.full_name}, "
-                f"ID: {ti.employee_id}, "
-                f"Type: {ti.tutor_type}, "
-                f"Subtype: {ti.tutor_subtype}"
-            )
-            if ti.tutor_subtype:
-                subtype_stats["with_subtype"] += 1
+    # Update employees in DB
+    updated_count = 0
+    not_found_count = 0
+    async with get_stp_session() as session:
+        for fullname, tutor_info in tutors_dict.items():
+            db_emp = await find_employee_by_fullname(session, fullname)
+
+            if db_emp:
+                emp_id = tutor_info["employee_id"]
+                db_emp.employee_id = int(emp_id) if emp_id else None
+                db_emp.is_tutor = True
+                db_emp.tutor_type = tutor_info["tutor_type"]
+                db_emp.tutor_subtype = tutor_info["tutor_subtype"]
+
+                logger.debug(
+                    f"[Employees] Updated tutor {fullname}: "
+                    f"subtype={tutor_info['tutor_subtype']}, "
+                    f"type={tutor_info['tutor_type']}, "
+                    f"employee_id={tutor_info['employee_id']}"
+                )
+                updated_count += 1
             else:
-                subtype_stats["without_subtype"] += 1
+                not_found_count += 1
+                logger.debug(f"[Employees] Employee not found in DB: {fullname}")
 
-            tutors_dict[ti.full_name] = {
-                "employee_id": ti.employee_id,
-                "tutor_type": ti.tutor_type,
-                "tutor_subtype": ti.tutor_subtype,
-            }
+        await session.commit()
 
-        logger.info(
-            f"[Employees] Tutor subtype stats: "
-            f"{subtype_stats['with_subtype']} with subtype, "
-            f"{subtype_stats['without_subtype']} without subtype"
-        )
-
-        # Update employees in DB
-        updated_count = 0
-        not_found_count = 0
-        async with get_stp_session() as session:
-            for fullname, tutor_info in tutors_dict.items():
-                stmt = select(Employee).where(Employee.fullname == fullname)
-                result = await session.execute(stmt)
-                db_emp = result.scalar_one_or_none()
-
-                if db_emp:
-                    db_emp.employee_id = tutor_info["employee_id"]
-                    db_emp.is_tutor = True
-                    db_emp.tutor_type = tutor_info["tutor_type"]
-                    db_emp.tutor_subtype = tutor_info["tutor_subtype"]
-
-                    logger.debug(
-                        f"[Employees] Updated tutor {fullname}: "
-                        f"subtype={tutor_info['tutor_subtype']}, "
-                        f"type={tutor_info['tutor_type']}, "
-                        f"employee_id={tutor_info['employee_id']}"
-                    )
-                    updated_count += 1
-                else:
-                    not_found_count += 1
-                    logger.debug(f"[Employees] Employee not found in DB: {fullname}")
-
-            await session.commit()
-
-        logger.info(
-            f"[Employees] Updated {updated_count} tutor records "
-            f"({not_found_count} tutors not found in DB)"
-        )
-        return updated_count
-
-    return await _update()
-
-
-# ==============================================================================
-# PUBLIC API FUNCTIONS
-# ==============================================================================
+    logger.info(
+        f"[Employees] Updated {updated_count} tutor records "
+        f"({not_found_count} tutors not found in DB)"
+    )
+    return updated_count
 
 
 async def fill_birthdays(dossier_api: DossierAPI) -> int:
@@ -451,17 +359,12 @@ async def fill_tutor_info(tutors_api: TutorsAPI) -> int:
     return await update_tutor_info(tutors_api)
 
 
+@log_processing_time("All employee data processing")
 async def fill_employees(dossier_api: DossierAPI, tutors_api: TutorsAPI) -> None:
     """Main function to fill all employee-related data."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("All employee data processing")
-    async def _fill():
-        logger.info(
-            "[Employees] Starting comprehensive employee data update (all data + tutor info)"
-        )
-        await update_all_employee_data(dossier_api)
-        await update_tutor_info(tutors_api)
-        logger.info("[Employees] Comprehensive employee data update completed")
-
-    await _fill()
+    logger.info(
+        "[Employees] Starting comprehensive employee data update (all data + tutor info)"
+    )
+    await update_all_employee_data(dossier_api)
+    await update_tutor_info(tutors_api)
+    logger.info("[Employees] Comprehensive employee data update completed")

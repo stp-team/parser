@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from okc_py import UreAPI
 from okc_py.api.models.ure import (
@@ -15,7 +16,6 @@ from okc_py.api.models.ure import (
     SalesPotentialDataRecord,
 )
 from sqlalchemy import delete
-from sqlalchemy.orm import DeclarativeBase
 from stp_database.models.Stats import SpecDayKPI, SpecMonthKPI, SpecWeekKPI
 
 from src.core.db import get_stats_session
@@ -24,10 +24,10 @@ from src.services.helpers import (
     get_week_start_date,
     get_yesterday_date,
 )
+from src.tasks.base import BatchDBOperator, ConcurrentAPIFetcher, log_processing_time
 
 logger = logging.getLogger(__name__)
 
-# Report types and their corresponding Pydantic models
 REPORT_TYPES = {
     "AHT": AHTDataRecord,
     "FLR": FLRDataRecord,
@@ -39,11 +39,89 @@ REPORT_TYPES = {
     "PaidService": PaidServiceRecord,
     "CSAT": CSATDataRecord,
 }
+# Field mapping configuration for each report type
+FIELD_MAPPERS = {
+    "AHT": lambda kpi, r: setattr_kpi(
+        kpi,
+        r,
+        "aht",
+        "aht_chats_web",
+        "aht_chats_mobile",
+        "aht_chats_dhcp",
+        "aht_chats_smartdom",
+        "aht_chats_telegram",
+        "aht_chats_viber",
+        contacts_count="aht_total_contacts",
+    ),
+    "FLR": lambda kpi, r: setattr_kpi(
+        kpi,
+        r,
+        "flr",
+        "flr_services",
+        flr_services_cross="flr_services_cross",
+        flr_services_transfer="flr_services_transfers",
+    ),
+    "CSI": lambda kpi, r: setattr_kpi(kpi, r, "csi"),
+    "POK": lambda kpi, r: setattr_kpi(kpi, r, "pok", "pok_rated_contacts"),
+    "DELAY": lambda kpi, r: setattr_kpi(kpi, r, "delay"),
+    "Sales": lambda kpi, r: setattr_kpi(
+        kpi,
+        r,
+        "sales",
+        "sales_videos",
+        "sales_routers",
+        "sales_tvs",
+        "sales_intercoms",
+        "sales_conversion",
+    ),
+    "SalesPotential": lambda kpi, r: setattr_kpi(
+        kpi,
+        r,
+        "sales_potential",
+        "sales_potential_video",
+        "sales_potential_routers",
+        "sales_potential_tvs",
+        "sales_potential_intercoms",
+        "sales_potential_conversion",
+    ),
+    "PaidService": lambda kpi, r: setattr_kpi(
+        kpi, r, "services", "services_remote", "services_onsite", "services_conversion"
+    ),
+    "CSAT": lambda kpi, r: setattr_kpi(
+        kpi, r, "csat", csat_rated="total_rated", csat_high_rated="total_high_rated"
+    ),
+}
+
+
+def setattr_kpi(kpi_obj: Any, record: Any, *attrs: str, **mapping: str) -> None:
+    """Set attributes on KPI object from record with optional field name mapping."""
+    for attr in attrs:
+        setattr(kpi_obj, attr, getattr(record, attr, None))
+    for kpi_attr, record_attr in mapping.items():
+        setattr(kpi_obj, kpi_attr, getattr(record, record_attr, None))
+
+
+def parse_employee_id(employee_id: Any) -> int | None:
+    """Parse and validate employee_id from various formats."""
+    if not employee_id:
+        return None
+
+    if isinstance(employee_id, int):
+        return employee_id if employee_id != 0 else None
+
+    if isinstance(employee_id, str):
+        emp_id = employee_id.split("-")[0] if "-" in employee_id else employee_id
+        try:
+            return int(emp_id) if int(emp_id) != 0 else None
+        except ValueError:
+            return None
+
+    return None
 
 
 def aggregate_kpi_data(
     api_results: list[tuple],
-    model_class: type[DeclarativeBase],
+    model_class: type,
     extraction_period: datetime,
 ) -> list:
     """Aggregate KPI data by employee_id."""
@@ -54,41 +132,23 @@ def aggregate_kpi_data(
             continue
 
         record_class = REPORT_TYPES.get(report_type)
-        if not record_class:
+        mapper = FIELD_MAPPERS.get(report_type)
+        if not record_class or not mapper:
             continue
 
         for item in api_result.data:
-            # API returns already-parsed Pydantic models, use them directly
-            if isinstance(item, record_class):
-                record = item
-            elif isinstance(item, dict):
-                # Fallback: if it's a dict, validate it
-                try:
-                    record = record_class.model_validate(item)
-                except Exception:
-                    continue
-            else:
-                # Try to validate anyway
-                try:
-                    record = record_class.model_validate(item)
-                except Exception:
-                    continue
-
-            employee_id = record.id
-            if not employee_id:
+            try:
+                record = (
+                    item
+                    if isinstance(item, record_class)
+                    else record_class.model_validate(item)
+                )
+            except Exception:
                 continue
 
-            # Convert employee_id to integer if it's a string
-            if isinstance(employee_id, str):
-                # Handle composite IDs like "106913-16188" -> extract first part
-                if "-" in employee_id:
-                    employee_id = employee_id.split("-")[0]
-                try:
-                    employee_id = int(employee_id)
-                except ValueError:
-                    # Skip completely malformed IDs
-                    logger.warning(f"Skipping malformed employee_id (string): {employee_id}")
-                    continue
+            employee_id = parse_employee_id(record.id)
+            if employee_id is None:
+                continue
 
             if employee_id not in kpi_by_employee_id:
                 kpi_obj = model_class()
@@ -96,72 +156,9 @@ def aggregate_kpi_data(
                 kpi_obj.extraction_period = extraction_period
                 kpi_by_employee_id[employee_id] = kpi_obj
 
-            kpi_obj = kpi_by_employee_id[employee_id]
+            mapper(kpi_by_employee_id[employee_id], record)
 
-            # Маппинг в зависимости от типа репорта
-            if report_type == "AHT":
-                kpi_obj.aht = record.aht
-                kpi_obj.aht_chats_web = record.aht_chats_web
-                kpi_obj.aht_chats_mobile = record.aht_chats_mobile
-                kpi_obj.aht_chats_dhcp = record.aht_chats_dhcp
-                kpi_obj.aht_chats_smartdom = record.aht_chats_smartdom
-                kpi_obj.aht_chats_telegram = record.aht_chats_telegram
-                kpi_obj.aht_chats_viber = record.aht_chats_viber
-                kpi_obj.contacts_count = record.aht_total_contacts
-
-            elif report_type == "FLR":
-                kpi_obj.flr = record.flr
-                kpi_obj.flr_services = record.flr_services
-                kpi_obj.flr_services_cross = record.flr_services_cross
-                kpi_obj.flr_services_transfer = record.flr_services_transfers
-
-            elif report_type == "CSI":
-                kpi_obj.csi = record.csi
-
-            elif report_type == "POK":
-                kpi_obj.pok = record.pok
-                kpi_obj.pok_rated_contacts = record.pok_rated_contacts
-
-            elif report_type == "DELAY":
-                kpi_obj.delay = record.delay
-
-            elif report_type == "Sales":
-                kpi_obj.sales = record.sales
-                kpi_obj.sales_videos = record.sales_videos
-                kpi_obj.sales_routers = record.sales_routers
-                kpi_obj.sales_tvs = record.sales_tvs
-                kpi_obj.sales_intercoms = record.sales_intercoms
-                kpi_obj.sales_conversion = record.sales_conversion
-
-            elif report_type == "SalesPotential":
-                kpi_obj.sales_potential = record.sales_potential
-                kpi_obj.sales_potential_video = record.sales_potential_video
-                kpi_obj.sales_potential_routers = record.sales_potential_routers
-                kpi_obj.sales_potential_tvs = record.sales_potential_tvs
-                kpi_obj.sales_potential_intercoms = record.sales_potential_intercoms
-                kpi_obj.sales_potential_conversion = record.sales_potential_conversion
-
-            elif report_type == "PaidService":
-                kpi_obj.services = record.services
-                kpi_obj.services_remote = record.services_remote
-                kpi_obj.services_onsite = record.services_onsite
-                kpi_obj.services_conversion = record.services_conversion
-
-            elif report_type == "CSAT":
-                kpi_obj.csat = record.csat
-                kpi_obj.csat_rated = record.total_rated
-                kpi_obj.csat_high_rated = record.total_high_rated
-
-    # Filter out any records where employee_id is None or not a valid integer
-    valid_kpi_data = []
-    for kpi_obj in kpi_by_employee_id.values():
-        emp_id = kpi_obj.employee_id
-        # Skip if employee_id is None, not an integer, or equals 0
-        if emp_id is None or not isinstance(emp_id, int) or emp_id == 0:
-            logger.warning(f"Skipping invalid employee_id: {emp_id} (type: {type(emp_id)})")
-            continue
-        valid_kpi_data.append(kpi_obj)
-    return valid_kpi_data
+    return [kpi for kpi in kpi_by_employee_id.values() if kpi.employee_id]
 
 
 async def fetch_kpi_reports(
@@ -171,11 +168,7 @@ async def fetch_kpi_reports(
     start_date: datetime = None,
     use_week_period: bool = False,
 ) -> list:
-    """Fetch KPI reports from API."""
-    tasks = []
-    for division in divisions:
-        for report_type in report_types:
-            tasks.append((division, report_type))
+    """Fetch KPI reports from API using concurrent fetcher."""
 
     async def fetch_kpi(division: str, report_type: str):
         try:
@@ -190,39 +183,49 @@ async def fetch_kpi_reports(
                 result = await api.get_period_kpi(
                     division=division, report=report_type, days=1
                 )
-            return (division, report_type), result
+            return result
         except Exception as e:
             logger.error(f"Error fetching {division}/{report_type}: {e}")
-            return (division, report_type), None
+            return None
 
-    results = await asyncio.gather(
-        *[fetch_kpi(d, r) for d, r in tasks], return_exceptions=True
-    )
-    return [r for r in results if not isinstance(r, Exception)]
+    tasks = [
+        (division, report_type)
+        for division in divisions
+        for report_type in report_types
+    ]
+    fetcher = ConcurrentAPIFetcher(semaphore_limit=15)
+    results = await fetcher.fetch_parallel(tasks, fetch_kpi)
+    return [
+        (task_params, result) for task_params, result in results if result is not None
+    ]
 
 
-async def save_kpi_data(data: list, model_class: type[DeclarativeBase]) -> int:
-    """Save KPI data to database."""
+async def save_kpi_data(data: list, model_class: type) -> int:
+    """Save KPI data to database using BatchDBOperator."""
+
+    async def delete_old_data():
+        async with get_stats_session() as session:
+            await session.execute(
+                delete(model_class).where(model_class.employee_id.is_(None))
+            )
+            await session.execute(delete(model_class))
+            await session.commit()
+
+    if not data:
+        return 0
+
     async with get_stats_session() as session:
-        # Delete rows where employee_id is None first
-        await session.execute(
-            delete(model_class).where(model_class.employee_id.is_(None))
+        db_operator = BatchDBOperator(session)
+        return await db_operator.bulk_insert_with_cleanup(
+            data_list=data,
+            delete_func=delete_old_data,
+            operation_name=f"{model_class.__name__} Update",
         )
-        # Truncate the entire table
-        await session.execute(delete(model_class))
-
-        if data:
-            # Insert new data for the period being extracted
-            session.add_all(data)
-
-        await session.commit()
-
-    return len(data) if data else 0
 
 
 async def process_kpi(
     api: UreAPI,
-    model_class: type[DeclarativeBase],
+    model_class: type,
     extraction_period: datetime,
     start_date: datetime = None,
     use_week_period: bool = False,
@@ -233,7 +236,6 @@ async def process_kpi(
     model_name = model_class.__name__
     logger.info(f"[{model_name}] Processing KPI data for period: {extraction_period}")
 
-    divisions = unites
     report_types = [
         "AHT",
         "FLR",
@@ -245,101 +247,67 @@ async def process_kpi(
         "PaidService",
         "CSAT",
     ]
-
     logger.info(
-        f"[{model_name}] Fetching {len(divisions)} divisions x {len(report_types)} report types"
+        f"[{model_name}] Fetching {len(unites)} divisions x {len(report_types)} report types"
     )
 
-    # Fetch
     api_results = await fetch_kpi_reports(
-        api, divisions, report_types, start_date, use_week_period
+        api, unites, report_types, start_date, use_week_period
     )
-
     logger.info(
         f"[{model_name}] Fetched {len(api_results)} API results, aggregating data"
     )
 
-    # Aggregate
     kpi_data = aggregate_kpi_data(api_results, model_class, extraction_period)
-
     if not kpi_data:
         logger.warning(f"[{model_name}] No KPI data aggregated after processing")
         return 0
 
     logger.info(f"[{model_name}] Aggregated {len(kpi_data)} employee records")
-
-    # Save
     saved_count = await save_kpi_data(kpi_data, model_class)
     logger.info(f"[{model_name}] Saved {saved_count} records to database")
     return saved_count
 
 
 # Public API
+@log_processing_time("Daily KPI data processing")
 async def fill_day_kpi(api: UreAPI) -> None:
     """Fill daily KPI data."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("Daily KPI data processing")
-    async def _fill():
-        extraction_date = get_yesterday_date()
-        logger.info(f"Starting daily KPI data update for {extraction_date}")
-        count = await process_kpi(api, SpecDayKPI, extraction_date)
-        logger.info(f"Daily KPI data update completed: {count} records")
-
-    await _fill()
+    extraction_date = get_yesterday_date()
+    logger.info(f"Starting daily KPI data update for {extraction_date}")
+    count = await process_kpi(api, SpecDayKPI, extraction_date)
+    logger.info(f"Daily KPI data update completed: {count} records")
 
 
+@log_processing_time("Weekly KPI data processing")
 async def fill_week_kpi(api: UreAPI) -> None:
     """Fill weekly KPI data."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("Weekly KPI data processing")
-    async def _fill():
-        extraction_date = get_week_start_date()
-        logger.info(f"Starting weekly KPI data update for {extraction_date}")
-        count = await process_kpi(
-            api,
-            SpecWeekKPI,
-            extraction_date,
-            start_date=get_week_start_date(),
-            use_week_period=True,
-        )
-        logger.info(f"Weekly KPI data update completed: {count} records")
-
-    await _fill()
+    extraction_date = get_week_start_date()
+    logger.info(f"Starting weekly KPI data update for {extraction_date}")
+    count = await process_kpi(
+        api,
+        SpecWeekKPI,
+        extraction_date,
+        start_date=extraction_date,
+        use_week_period=True,
+    )
+    logger.info(f"Weekly KPI data update completed: {count} records")
 
 
+@log_processing_time("Monthly KPI data processing")
 async def fill_month_kpi(api: UreAPI) -> None:
     """Fill monthly KPI data."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("Monthly KPI data processing")
-    async def _fill():
-        extraction_date = get_month_period_for_kpi()
-        logger.info(f"Starting monthly KPI data update for {extraction_date}")
-        count = await process_kpi(
-            api,
-            SpecMonthKPI,
-            extraction_date,
-            start_date=get_month_period_for_kpi(),
-        )
-        logger.info(f"Monthly KPI data update completed: {count} records")
-
-    await _fill()
+    extraction_date = get_month_period_for_kpi()
+    logger.info(f"Starting monthly KPI data update for {extraction_date}")
+    count = await process_kpi(
+        api, SpecMonthKPI, extraction_date, start_date=extraction_date
+    )
+    logger.info(f"Monthly KPI data update completed: {count} records")
 
 
+@log_processing_time("All KPI data processing")
 async def fill_kpi(api: UreAPI) -> None:
     """Fill all KPI types."""
-    from src.tasks.base import log_processing_time
-
-    @log_processing_time("All KPI data processing")
-    async def _fill():
-        logger.info("Starting full KPI data update (day, week, month)")
-        await asyncio.gather(
-            fill_day_kpi(api),
-            fill_week_kpi(api),
-            fill_month_kpi(api),
-        )
-        logger.info("Full KPI data update completed")
-
-    await _fill()
+    logger.info("Starting full KPI data update (day, week, month)")
+    await asyncio.gather(fill_day_kpi(api), fill_week_kpi(api), fill_month_kpi(api))
+    logger.info("Full KPI data update completed")
