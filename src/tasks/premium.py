@@ -4,7 +4,7 @@ from datetime import datetime
 
 from okc_py import PremiumAPI
 from okc_py.api.models.premium import HeadPremiumData, SpecialistPremiumData
-from sqlalchemy import Delete
+from sqlalchemy import delete
 from stp_database.models.Stats import HeadPremium, SpecPremium
 
 from src.core.db import get_stats_session
@@ -36,7 +36,7 @@ def map_spec_premium(row: SpecialistPremiumData) -> SpecPremium:
     """Map Pydantic model to DB model - direct field access."""
     premium = SpecPremium()
     premium.extraction_period = datetime.strptime(row.period, "%d.%m.%Y")
-    premium.fullname = row.user_fullname
+    premium.employee_id = row.employee_id
     premium.contacts_count = row.total_contacts
     premium.csi = row.csi
     premium.csi_normative = row.csi_normative
@@ -78,7 +78,7 @@ def map_head_premium(row: HeadPremiumData) -> HeadPremium:
     """Map Pydantic model to DB model - direct field access."""
     premium = HeadPremium()
     premium.extraction_period = datetime.strptime(row.period, "%d.%m.%Y")
-    premium.fullname = row.user_fullname
+    premium.employee_id = row.employee_id
     premium.sl = row.sl
     premium.sl_normative_first = row.sl_normative_first
     premium.sl_normative_second = row.sl_normative_second
@@ -140,6 +140,9 @@ async def fill_premium(
         items = result.premium if is_head else result.items
         for row in items:
             premium = map_head_premium(row) if is_head else map_spec_premium(row)
+            # Skip records without employee_id
+            if not premium.employee_id:
+                continue
             premium_objects.append(premium)
 
     if not premium_objects:
@@ -156,9 +159,12 @@ async def fill_premium(
             f"[{premium_type} Premium] Deleting old data and inserting new records"
         )
 
+        # Delete rows where employee_id is None
+        await session.execute(delete(model).where(model.employee_id.is_(None)))
+
         for premium in premium_objects:
             await session.execute(
-                Delete(model).where(
+                delete(model).where(
                     model.extraction_period == premium.extraction_period
                 )
             )

@@ -46,8 +46,8 @@ def aggregate_kpi_data(
     model_class: type[DeclarativeBase],
     extraction_period: datetime,
 ) -> list:
-    """Aggregate KPI data by fullname."""
-    kpi_by_fullname = {}
+    """Aggregate KPI data by employee_id."""
+    kpi_by_employee_id = {}
 
     for (_, report_type), api_result in api_results:
         if not api_result or not hasattr(api_result, "data"):
@@ -57,23 +57,46 @@ def aggregate_kpi_data(
         if not record_class:
             continue
 
-        for row_dict in api_result.data:
-            try:
-                record = record_class.model_validate(row_dict)
-            except Exception:
+        for item in api_result.data:
+            # API returns already-parsed Pydantic models, use them directly
+            if isinstance(item, record_class):
+                record = item
+            elif isinstance(item, dict):
+                # Fallback: if it's a dict, validate it
+                try:
+                    record = record_class.model_validate(item)
+                except Exception:
+                    continue
+            else:
+                # Try to validate anyway
+                try:
+                    record = record_class.model_validate(item)
+                except Exception:
+                    continue
+
+            employee_id = record.id
+            if not employee_id:
                 continue
 
-            fullname = record.fullname
-            if not fullname:
-                continue
+            # Convert employee_id to integer if it's a string
+            if isinstance(employee_id, str):
+                # Handle composite IDs like "106913-16188" -> extract first part
+                if "-" in employee_id:
+                    employee_id = employee_id.split("-")[0]
+                try:
+                    employee_id = int(employee_id)
+                except ValueError:
+                    # Skip completely malformed IDs
+                    logger.warning(f"Skipping malformed employee_id (string): {employee_id}")
+                    continue
 
-            if fullname not in kpi_by_fullname:
+            if employee_id not in kpi_by_employee_id:
                 kpi_obj = model_class()
-                kpi_obj.fullname = fullname
+                kpi_obj.employee_id = employee_id
                 kpi_obj.extraction_period = extraction_period
-                kpi_by_fullname[fullname] = kpi_obj
+                kpi_by_employee_id[employee_id] = kpi_obj
 
-            kpi_obj = kpi_by_fullname[fullname]
+            kpi_obj = kpi_by_employee_id[employee_id]
 
             # Маппинг в зависимости от типа репорта
             if report_type == "AHT":
@@ -129,7 +152,16 @@ def aggregate_kpi_data(
                 kpi_obj.csat_rated = record.total_rated
                 kpi_obj.csat_high_rated = record.total_high_rated
 
-    return list(kpi_by_fullname.values())
+    # Filter out any records where employee_id is None or not a valid integer
+    valid_kpi_data = []
+    for kpi_obj in kpi_by_employee_id.values():
+        emp_id = kpi_obj.employee_id
+        # Skip if employee_id is None, not an integer, or equals 0
+        if emp_id is None or not isinstance(emp_id, int) or emp_id == 0:
+            logger.warning(f"Skipping invalid employee_id: {emp_id} (type: {type(emp_id)})")
+            continue
+        valid_kpi_data.append(kpi_obj)
+    return valid_kpi_data
 
 
 async def fetch_kpi_reports(
@@ -171,17 +203,21 @@ async def fetch_kpi_reports(
 
 async def save_kpi_data(data: list, model_class: type[DeclarativeBase]) -> int:
     """Save KPI data to database."""
-    if not data:
-        return 0
-
     async with get_stats_session() as session:
-        # Truncate the entire table first
+        # Delete rows where employee_id is None first
+        await session.execute(
+            delete(model_class).where(model_class.employee_id.is_(None))
+        )
+        # Truncate the entire table
         await session.execute(delete(model_class))
-        # Insert new data for the period being extracted
-        session.add_all(data)
+
+        if data:
+            # Insert new data for the period being extracted
+            session.add_all(data)
+
         await session.commit()
 
-    return len(data)
+    return len(data) if data else 0
 
 
 async def process_kpi(
