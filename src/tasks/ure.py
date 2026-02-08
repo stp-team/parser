@@ -187,7 +187,9 @@ def aggregate_kpi_data(
                     kpi_obj.extraction_period = extraction_period
                     kpi_by_employee_id[employee_id] = kpi_obj
 
-                current_thanks = getattr(kpi_by_employee_id[employee_id], "thanks", 0) or 0
+                current_thanks = (
+                    getattr(kpi_by_employee_id[employee_id], "thanks", 0) or 0
+                )
                 kpi_by_employee_id[employee_id].thanks = current_thanks + 1
 
     return [kpi for kpi in kpi_by_employee_id.values() if kpi.employee_id]
@@ -268,9 +270,7 @@ async def fetch_thanks_reports(
         [(division,) for division in divisions], fetch_thanks
     )
     return [
-        result
-        for task_params, result in results
-        if result is not None and result[1]
+        result for task_params, result in results if result is not None and result[1]
     ]
 
 

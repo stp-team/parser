@@ -95,10 +95,9 @@ async def fill_sl(
 
     logger.info(f"[SL] Mapped {len(sl_objects)} SL records")
 
-    # Save with optimized deletion
     async with get_stats_session() as session:
         logger.info("[SL] Deleting old SL data and inserting new records")
-        unique_periods = set(sl.extraction_period for sl in sl_objects)
+        unique_periods = {sl.extraction_period for sl in sl_objects}
         for period in unique_periods:
             await session.execute(delete(SL).where(SL.extraction_period == period))
         session.add_all(sl_objects)

@@ -109,7 +109,7 @@ async def fill_premium(
     results = await fetcher.fetch_parallel(tasks, fetch)
 
     premium_objects = []
-    for (period, division), result in results:
+    for (_period, _division), result in results:
         if result is None:
             continue
 
@@ -135,10 +135,10 @@ async def fill_premium(
 
         # Delete rows where employee_id is None and old period data
         await session.execute(delete(model).where(model.employee_id.is_(None)))
-        unique_periods = set(p.extraction_period for p in premium_objects)
-        for period in unique_periods:
+        unique_periods = {p.extraction_period for p in premium_objects}
+        for _period in unique_periods:
             await session.execute(
-                delete(model).where(model.extraction_period == period)
+                delete(model).where(model.extraction_period == _period)
             )
 
         session.add_all(premium_objects)

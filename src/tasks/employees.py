@@ -36,12 +36,21 @@ async def fetch_employee_details_concurrent(
     semaphore_limit: int = 10,
     **api_kwargs,
 ) -> list:
-    """Fetch employee details concurrently using ConcurrentAPIFetcher."""
+    """Fetch employee details concurrently using ConcurrentAPIFetcher.
 
-    async def fetch_detail(fullname: str):
-        return await dossier_api.get_employee(employee_fullname=fullname, **api_kwargs)
+    IMPORTANT: This function expects database Employee objects with 'employee_id' attribute.
+    The DossierAPI.get_employee() method requires employee_id (OKC ID).
+    """
 
-    tasks = [(e.fullname,) for e in employees if hasattr(e, "fullname") and e.fullname]
+    async def fetch_detail(employee_id: int):
+        return await dossier_api.get_employee(employee_id=employee_id, **api_kwargs)
+
+    # Extract employee_id from database Employee objects
+    tasks = [
+        (e.employee_id,)
+        for e in employees
+        if hasattr(e, "employee_id") and e.employee_id
+    ]
     fetcher = ConcurrentAPIFetcher(semaphore_limit=semaphore_limit)
     results = await fetcher.fetch_parallel(tasks, fetch_detail)
     return [result for _, result in results if result is not None]
@@ -77,30 +86,47 @@ async def update_birthdays(dossier_api: DossierAPI) -> int:
 
 @log_processing_time("Employee employment dates update")
 async def update_employment_dates(dossier_api: DossierAPI) -> int:
-    """Update employee employment dates from DossierAPI - concurrent API calls."""
+    """Update employee employment dates from DossierAPI - only for employees missing data."""
     logger.info("[Employees] Starting employee employment dates update")
-    employees_data = await dossier_api.get_employees(exclude_fired=True)
-    if not employees_data:
-        logger.warning("[Employees] No employees data received from API")
+
+    # Get employees from database that are missing employment_date AND have employee_id set
+    async with get_stp_session() as session:
+        stmt = select(Employee).where(
+            Employee.employment_date.is_(None), Employee.employee_id.is_not(None)
+        )
+        result = await session.execute(stmt)
+        db_employees_needing_update = result.scalars().all()
+
+    if not db_employees_needing_update:
+        logger.info(
+            "[Employees] No employees missing employment_date (with employee_id)"
+        )
         return 0
 
-    valid_employees = [e for e in employees_data if e.fullname]
-    logger.info(f"[Employees] Fetching details for {len(valid_employees)} employees")
-
-    emp_details = await fetch_employee_details_concurrent(
-        dossier_api, valid_employees, semaphore_limit=10
+    logger.info(
+        f"[Employees] Found {len(db_employees_needing_update)} employees missing employment_date"
     )
 
+    # Fetch detailed data using employee_id from database (concurrently)
+    logger.info(
+        f"[Employees] Fetching details for {len(db_employees_needing_update)} employees..."
+    )
+    emp_details = await fetch_employee_details_concurrent(
+        dossier_api, db_employees_needing_update, semaphore_limit=10
+    )
+
+    # Update database
     updated_count = 0
     async with get_stp_session() as session:
-        for emp_pydantic, emp_detail in zip(valid_employees, emp_details, strict=True):
+        for db_emp, emp_detail in zip(
+            db_employees_needing_update, emp_details, strict=True
+        ):
             if not emp_detail or not emp_detail.employeeInfo:
                 continue
 
             info = emp_detail.employeeInfo
-            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
 
-            if db_emp and info.employment_date:
+            if info.employment_date:
                 db_emp.employment_date = parse_date(info.employment_date)
                 if db_emp.employment_date:
                     updated_count += 1
@@ -113,31 +139,40 @@ async def update_employment_dates(dossier_api: DossierAPI) -> int:
 
 @log_processing_time("Employee IDs update")
 async def update_employee_ids(dossier_api: DossierAPI) -> int:
-    """Update employee IDs from DossierAPI - concurrent API calls."""
+    """Update employee IDs from DossierAPI - only for employees missing employee_id."""
     logger.info("[Employees] Starting employee IDs update")
+
+    # Get employees from database that are missing employee_id
+    async with get_stp_session() as session:
+        stmt = select(Employee).where(Employee.employee_id.is_(None))
+        result = await session.execute(stmt)
+        db_employees_needing_update = result.scalars().all()
+
+    if not db_employees_needing_update:
+        logger.info("[Employees] No employees missing employee_id")
+        return 0
+
+    logger.info(
+        f"[Employees] Found {len(db_employees_needing_update)} employees missing employee_id"
+    )
+
+    # Get all employees from API (single call) - the API response includes the employee ID
     employees_data = await dossier_api.get_employees(exclude_fired=True)
     if not employees_data:
         logger.warning("[Employees] No employees data received from API")
         return 0
 
-    valid_employees = [e for e in employees_data if e.fullname]
-    logger.info(f"[Employees] Fetching details for {len(valid_employees)} employees")
+    logger.info(f"[Employees] Retrieved {len(employees_data)} employees from API")
 
-    emp_details = await fetch_employee_details_concurrent(
-        dossier_api, valid_employees, semaphore_limit=10
-    )
-
+    # Match by fullname and update employee_id
+    api_employees_by_fullname = {e.fullname: e for e in employees_data if e.fullname}
     updated_count = 0
+
     async with get_stp_session() as session:
-        for emp_pydantic, emp_detail in zip(valid_employees, emp_details, strict=True):
-            if not emp_detail or not emp_detail.employeeInfo:
-                continue
-
-            info = emp_detail.employeeInfo
-            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
-
-            if db_emp:
-                db_emp.employee_id = int(info.id) if info.id else None
+        for db_emp in db_employees_needing_update:
+            if db_emp.fullname in api_employees_by_fullname:
+                api_emp = api_employees_by_fullname[db_emp.fullname]
+                db_emp.employee_id = api_emp.id
                 updated_count += 1
 
         await session.commit()
@@ -148,86 +183,82 @@ async def update_employee_ids(dossier_api: DossierAPI) -> int:
 
 @log_processing_time("All employee data update")
 async def update_all_employee_data(dossier_api: DossierAPI) -> int:
-    """Update all employee data (birthdays, employment dates, IDs) - only for employees missing data."""
+    """Update all employee data (employee_id, employment dates, birthdays) - only for employees missing data.
+
+    This function:
+    1. Fills in employee_id for employees missing it (calls get_employees once)
+    2. Fetches detailed data (employment_date, birthday) for employees with employee_id
+    """
     logger.info("[Employees] Starting comprehensive employee data update")
 
-    # Step 1: Get employees from database that are missing employment_date or birthday
+    # Step 1: Fill in employee_id for anyone missing it
+    logger.info("[Employees] Step 1: Filling missing employee_id values")
+    await update_employee_ids(dossier_api)
+
+    # Step 2: Get employees from database that are missing employment_date or birthday
+    # and already have employee_id set
     async with get_stp_session() as session:
         stmt = select(Employee).where(
-            (Employee.employment_date.is_(None)) | (Employee.birthday.is_(None))
+            (Employee.employment_date.is_(None) | Employee.birthday.is_(None)),
+            Employee.employee_id.is_not(None),
         )
         result = await session.execute(stmt)
         db_employees_needing_update = result.scalars().all()
 
     if not db_employees_needing_update:
-        logger.info("[Employees] No employees missing employment_date or birthday")
+        logger.info(
+            "[Employees] No employees missing employment_date or birthday (with employee_id)"
+        )
         return 0
 
     logger.info(
-        f"[Employees] Found {len(db_employees_needing_update)} employees missing data in database"
+        f"[Employees] Found {len(db_employees_needing_update)} employees missing employment_date/birthday"
     )
 
-    # Step 2: Get all employees from API
-    employees_data = await dossier_api.get_employees(exclude_fired=True)
-    if not employees_data:
-        logger.warning("[Employees] No employees data received from DossierAPI")
-        return 0
-
-    logger.info(f"[Employees] Retrieved {len(employees_data)} employees from API")
-
-    # Step 3: Match by fullname
-    api_employees_by_fullname = {e.fullname: e for e in employees_data if e.fullname}
-    matched_employees = [
-        (db_emp, api_employees_by_fullname[db_emp.fullname])
-        for db_emp in db_employees_needing_update
-        if db_emp.fullname in api_employees_by_fullname
-    ]
-
+    # Step 3: Fetch detailed data using employee_id from database
     logger.info(
-        f"[Employees] Matched {len(matched_employees)} employees between DB and API"
+        f"[Employees] Fetching details for {len(db_employees_needing_update)} employees..."
     )
-
-    if not matched_employees:
-        return 0
-
-    # Step 4: Fetch detailed data only for matched employees (concurrently)
-    logger.info(
-        f"[Employees] Fetching details for {len(matched_employees)} matched employees..."
-    )
-    api_employees_list = [api_emp for _, api_emp in matched_employees]
     emp_details = await fetch_employee_details_concurrent(
         dossier_api,
-        api_employees_list,
+        db_employees_needing_update,
         semaphore_limit=20,
         show_kpi=False,
         show_criticals=False,
     )
 
-    # Step 5: Update database
+    # Step 4: Update database
     updated_count = 0
     async with get_stp_session() as session:
-        for (db_emp, api_emp), emp_detail in zip(
-            matched_employees, emp_details, strict=True
+        for db_emp, emp_detail in zip(
+            db_employees_needing_update, emp_details, strict=True
         ):
             if not emp_detail or not emp_detail.employeeInfo:
                 if isinstance(emp_detail, Exception):
                     logger.warning(
-                        f"[Employees] Error fetching {api_emp.fullname}: {emp_detail}"
+                        f"[Employees] Error fetching employee_id={db_emp.employee_id}: {emp_detail}"
                     )
                 continue
 
             info: EmployeeInfo = emp_detail.employeeInfo
-            db_emp = await find_employee_by_fullname(session, db_emp.fullname)
 
-            if db_emp:
-                db_emp.employee_id = int(info.id) if info.id else None
+            # Update employment_date if missing
+            if info.employment_date and not db_emp.employment_date:
                 db_emp.employment_date = parse_date(info.employment_date)
+                if db_emp.employment_date:
+                    updated_count += 1
+
+            # Update birthday if missing
+            if info.birthday and not db_emp.birthday:
                 db_emp.birthday = parse_date(info.birthday)
-                updated_count += 1
+                if db_emp.birthday:
+                    updated_count += 1
 
         await session.commit()
 
-    logger.info(f"[Employees] Updated {updated_count} employee records with all data")
+    logger.info(
+        f"[Employees] Updated {updated_count} employee records with employment_date/birthday"
+    )
     return updated_count
 
 

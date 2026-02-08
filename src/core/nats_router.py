@@ -4,7 +4,10 @@ from datetime import date, datetime
 from typing import Any
 
 from okc_py import OKC
+from sqlalchemy import select
+from stp_database.models.STP import Employee
 
+from src.core.db import get_stp_session
 from src.core.nats_client import nats_client
 
 logger = logging.getLogger(__name__)
@@ -199,20 +202,49 @@ class NATSRouter:
         show_kpi: bool = True,
         show_criticals: bool = True,
     ) -> dict[str, Any]:
-        """Handle individual employee command"""
+        """Handle individual employee command.
+
+        Args:
+            employee_id: OKC employee ID (preferred)
+            employee_fullname: Employee fullname (will be looked up in database to get employee_id)
+            show_kpi: Whether to include KPI data
+            show_criticals: Whether to include critical errors data
+        """
         logger.info(
             f"Processing employee command for ID={employee_id}, name={employee_fullname}"
         )
 
+        # If only fullname is provided, look up employee_id from database
+        if employee_id is None and employee_fullname:
+            async with get_stp_session() as session:
+                stmt = select(Employee).where(Employee.fullname == employee_fullname)
+                result = await session.execute(stmt)
+                db_employee = result.scalar_one_or_none()
+
+            if not db_employee or not db_employee.employee_id:
+                return {
+                    "error": f"Employee not found or missing employee_id in database: {employee_fullname}"
+                }
+
+            employee_id = db_employee.employee_id
+            logger.info(
+                f"Found employee_id={employee_id} for fullname={employee_fullname}"
+            )
+
+        if employee_id is None:
+            return {"error": "Either employee_id or employee_fullname must be provided"}
+
+        # Call API with employee_id
         employee_data = await self.employees_api.get_employee(
             employee_id=employee_id,
-            employee_fullname=employee_fullname,
             show_kpi=show_kpi,
             show_criticals=show_criticals,
         )
 
         if employee_data is None:
-            return {"error": "Employee not found or failed to fetch employee data"}
+            return {
+                "error": f"Employee not found or failed to fetch employee data for employee_id={employee_id}"
+            }
 
         # Convert employee data to dict for JSON serialization
         return serialize_object(employee_data)
