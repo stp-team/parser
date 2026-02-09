@@ -20,7 +20,12 @@ from src.tasks.employees import (
 from src.tasks.premium import fill_heads_premium, fill_specialists_premium
 from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
-from src.tasks.ure import fill_day_kpi, fill_month_kpi, fill_week_kpi
+from src.tasks.ure import (
+    fill_day_kpi,
+    fill_month_kpi,
+    fill_week_kpi,
+    update_all_kpi_user_id_and_questions,
+)
 
 
 class Scheduler:

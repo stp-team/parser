@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     DB_STP_NAME: str
     DB_STATS_NAME: str
+    DB_QUESTIONS_NAME: str
 
     # Настройки NATS
     NATS_HOST: str = ""

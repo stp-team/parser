@@ -500,7 +500,7 @@ requires-dist = [
     { name = "okc-py", git = "https://github.com/stp-team/okc-py.git" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
-    { name = "stp-database", git = "https://github.com/STP-Team/stp-database" },
+    { name = "stp-database", git = "https://github.com/STP-Team/stp-database?branch=achievements-beta" },
 ]
 
 [[package]]
@@ -755,7 +755,7 @@ wheels = [
 [[package]]
 name = "stp-database"
 version = "2.0"
-source = { git = "https://github.com/STP-Team/stp-database#ba9adf6dbcf591fbec7e2aef548e51eba14bdc74" }
+source = { git = "https://github.com/STP-Team/stp-database?branch=achievements-beta#7fa574cffa3ae7a42e5bdcd6b119911319ba497e" }
 dependencies = [
     { name = "aiomysql" },
     { name = "infrastructure" },
