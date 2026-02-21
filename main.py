@@ -6,8 +6,7 @@ from okc_py.config import Settings
 
 from src.core.config import settings
 from src.core.nats_client import nats_client
-from src.core.nats_router import setup_nats_router
-from src.core.ws_bridge import cleanup_ws_bridges, setup_ws_bridges
+from src.core.ws_bridge import cleanup_ws_bridges
 from src.services.logger import setup_logging
 from src.services.scheduler import Scheduler
 from src.tasks.employees import fill_employees
@@ -35,26 +34,26 @@ async def main():
         await okc_client.connect()
 
         # Инициализация и настройка NATS
-        try:
-            await nats_client.connect()
-            await setup_nats_router(okc_client=okc_client)
-            await nats_client.subscribe_to_commands()
-            logger.info("NATS client и router настроены")
-
-            # Setup WebSocket bridges for real-time lines data
-            try:
-                await setup_ws_bridges(
-                    okc_client=okc_client,
-                    lines=settings.WS_LINES,
-                )
-                logger.info(
-                    f"WebSocket bridges настроены для линий: {settings.WS_LINES}"
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось настроить WebSocket bridges: {e}")
-
-        except Exception as e:
-            logger.warning(f"Не удалось настроить NATS: {e}")
+        # try:
+        #     await nats_client.connect()
+        #     await setup_nats_router(okc_client=okc_client)
+        #     await nats_client.subscribe_to_commands()
+        #     logger.info("NATS client и router настроены")
+        #
+        #     # Setup WebSocket bridges for real-time lines data
+        #     try:
+        #         await setup_ws_bridges(
+        #             okc_client=okc_client,
+        #             lines=settings.WS_LINES,
+        #         )
+        #         logger.info(
+        #             f"WebSocket bridges настроены для линий: {settings.WS_LINES}"
+        #         )
+        #     except Exception as e:
+        #         logger.warning(f"Не удалось настроить WebSocket bridges: {e}")
+        #
+        # except Exception as e:
+        #     logger.warning(f"Не удалось настроить NATS: {e}")
 
         db_url = None
         if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
