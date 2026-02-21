@@ -127,14 +127,6 @@ class Scheduler:
         await self._setup_tutors()
         await self._setup_tests()
 
-        self.scheduler.add_job(
-            self._scheduler_health_check,
-            trigger=IntervalTrigger(minutes=30),
-            id="scheduler_health_check",
-            name="Health Check",
-            replace_existing=True,
-        )
-
     async def _setup_employees(self) -> None:
         """Настройка задач, связанных с сотрудниками."""
         self.scheduler.add_job(
@@ -201,7 +193,7 @@ class Scheduler:
         """Настройка задач, связанных с премиумом."""
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_specialists_premium, "premium_specialists"),
-            trigger=IntervalTrigger(minutes=15),
+            trigger=IntervalTrigger(hours=6),
             args=[self.okc_client.api.premium],
             id="premium_specialists",
             name="Заполнение премиума специалистов",
@@ -209,7 +201,7 @@ class Scheduler:
         )
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_heads_premium, "premium_heads"),
-            trigger=IntervalTrigger(minutes=15),
+            trigger=IntervalTrigger(hours=6),
             args=[self.okc_client.api.premium],
             id="premium_heads",
             name="Заполнение премиума руководителей",
@@ -224,7 +216,7 @@ class Scheduler:
                 lambda api: fill_tutor_schedule(api, full_update=False),
                 "tutors",
             ),
-            trigger=IntervalTrigger(minutes=5),
+            trigger=IntervalTrigger(hours=12),
             args=[self.okc_client.api.tutors],
             id="tutors",
             name="Обновление расписания наставников",
@@ -237,7 +229,7 @@ class Scheduler:
         """Настройка задач, связанных с тестами."""
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_assigned_tests, "tests_current"),
-            trigger=IntervalTrigger(minutes=10),
+            trigger=IntervalTrigger(hours=6),
             args=[self.okc_client.api.tests],
             id="tests_current",
             name="Заполнение назначенных тестов",
@@ -322,33 +314,6 @@ class Scheduler:
                 break
             except Exception as e:
                 self.logger.error(f"Health check loop error: {e}")
-
-    async def _scheduler_health_check(self) -> None:
-        """Выполняет проверку работоспособности планировщика."""
-        try:
-            if not self.scheduler.running:
-                self.logger.warning("Scheduler is not running!")
-                return
-
-            # Проверяем зависшие задачи (работают дольше чем положено)
-            current_time = datetime.now(settings.SCHEDULER_TIMEZONE)
-            stuck_jobs = []
-
-            for job in self.scheduler.get_jobs():
-                if (
-                    job.next_run_time
-                    and (current_time - job.next_run_time).total_seconds() > 3600
-                ):  # 1 час
-                    stuck_jobs.append(job.id)
-
-            if stuck_jobs:
-                self.logger.warning(f"Potentially stuck jobs detected: {stuck_jobs}")
-
-            # Логирование статистики
-            self.logger.info(f"Scheduler health: {self.job_stats}")
-
-        except Exception as e:
-            self.logger.error(f"Health check failed: {e}")
 
     def pause_job(self, job_id: str) -> bool:
         """Пауза конкретной задачи."""
