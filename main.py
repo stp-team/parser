@@ -19,6 +19,7 @@ from src.tasks.ure import fill_kpi
 # Optional dashboard import
 try:
     from src.services.cli_dashboard import get_dashboard
+    from src.services.scheduler_tracker import update_scheduler_jobs
 
     DASHBOARD_AVAILABLE = True
 except ImportError:
@@ -28,17 +29,25 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    # Setup logging with dashboard if available
-    use_dashboard = DASHBOARD_AVAILABLE and settings.ENABLE_DASHBOARD
-    setup_logging(use_dashboard=use_dashboard)
-
-    # Start dashboard if available
+    # Create dashboard instance BEFORE setting up logging
     dashboard = None
+    use_dashboard = DASHBOARD_AVAILABLE and settings.ENABLE_DASHBOARD
+
     if use_dashboard:
         dashboard = get_dashboard()
-        dashboard.start()
 
-    logger.info("Запуск парсера...")
+    # Setup logging with dashboard if available
+    setup_logging(use_dashboard=use_dashboard)
+
+    logger = logging.getLogger(__name__)
+
+    # Start dashboard after logging is setup
+    if use_dashboard and dashboard:
+        logger.info("Starting dashboard...")
+        dashboard.start()
+        logger.info("Dashboard started successfully")
+    else:
+        logger.info("Dashboard disabled or unavailable")
 
     okc_client = OKC(
         username=settings.OKC_USERNAME,
@@ -107,7 +116,12 @@ async def main():
 
             try:
                 while True:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(2)
+
+                    # Update scheduler tracker for dashboard
+                    if DASHBOARD_AVAILABLE:
+                        status = scheduler.get_job_status()
+                        update_scheduler_jobs(status["jobs"], status["scheduler_running"])
 
                     if logger.isEnabledFor(logging.DEBUG):
                         status = scheduler.get_job_status()
@@ -124,6 +138,16 @@ async def main():
         raise
 
     finally:
+        # Stop dashboard first (so we can see cleanup messages)
+        if dashboard:
+            try:
+                dashboard.stop()
+                # Give thread a moment to exit
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                # Ignore dashboard errors during shutdown
+                pass
+
         # Очистка ресурсов
         try:
             await cleanup_ws_bridges()
@@ -136,10 +160,6 @@ async def main():
             logger.warning(f"Ошибка при закрытии NATS соединения: {e}")
 
         await okc_client.close()
-
-        # Stop dashboard
-        if dashboard:
-            dashboard.stop()
 
 
 if __name__ == "__main__":

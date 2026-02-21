@@ -31,9 +31,6 @@ def setup_logging(use_dashboard: bool = True) -> None:
     log_format = "%(filename)s:%(lineno)d #%(levelname)-8s [%(asctime)s] - %(name)s - %(message)s"
     formatter = logging.Formatter(log_format)
 
-    # Настройка цветного вывода в консоль
-    bl.basic_colorized_config(level=log_level)
-
     # Настройка корневого логгера
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
@@ -41,16 +38,25 @@ def setup_logging(use_dashboard: bool = True) -> None:
     # Очистка существующих хендлеров
     root_logger.handlers.clear()
 
-    # Add dashboard handler if available and requested
+    # Add dashboard handler if available and requested (logs go to Live display)
+    dashboard_active = False
     if use_dashboard and DASHBOARD_AVAILABLE:
         try:
             dashboard = get_dashboard()
             dashboard_handler = dashboard.get_log_handler()
             dashboard_handler.setLevel(log_level)
             root_logger.addHandler(dashboard_handler)
+            dashboard_active = True
         except Exception as e:
-            # If dashboard setup fails, fall back to console handler
             logging.warning(f"Failed to setup dashboard handler: {e}")
+
+    # Only add console handler if dashboard is NOT active (avoids conflicts)
+    if not dashboard_active:
+        import sys
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
 
     # Файловый хендлер с ротацией (каждый день, хранить 2 дня)
     file_handler = TimedRotatingFileHandler(
