@@ -385,11 +385,6 @@ async def fill_employee_ids(dossier_api: DossierAPI) -> int:
     return await update_employee_ids(dossier_api)
 
 
-async def fill_tutor_info(tutors_api: TutorsAPI) -> int:
-    """Fill tutor information."""
-    return await update_tutor_info(tutors_api)
-
-
 @log_processing_time("All employee data processing")
 async def fill_employees(dossier_api: DossierAPI, tutors_api: TutorsAPI) -> None:
     """Main function to fill all employee-related data."""
