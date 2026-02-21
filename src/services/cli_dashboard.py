@@ -110,23 +110,25 @@ class CLIDashboard:
         table.add_column("Задача", style="cyan", width=25)
         table.add_column("Через", justify="right", style="green", width=10)
         table.add_column("В", justify="right", style="yellow", width=8)
+        table.add_column("Запусков", justify="right", style="bright_blue", width=8)
 
         if not SCHEDULER_TRACKER_AVAILABLE:
-            table.add_row("[dim]Scheduler tracking unavailable[/dim]", "", "")
+            table.add_row("[dim]Scheduler tracking unavailable[/dim]", "", "", "")
             return table
 
         tracker = get_scheduler_tracker()
         next_jobs = tracker.get_next_jobs(limit=5)
 
         if not next_jobs:
-            table.add_row("[dim]Нет запланированных задач[/dim]", "", "")
+            table.add_row("[dim]Нет запланированных задач[/dim]", "", "", "")
             return table
 
         for job in next_jobs:
             name = self._format_job_name(job["name"])
             countdown = self._format_countdown(job["seconds_until"])
             next_run_time = job["next_run"].strftime("%H:%M:%S")
-            table.add_row(name, countdown, next_run_time)
+            executions = job.get("executions", 0)
+            table.add_row(name, countdown, next_run_time, str(executions))
 
         return table
 

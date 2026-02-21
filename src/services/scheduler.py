@@ -26,6 +26,13 @@ from src.tasks.ure import (
     fill_week_kpi,
 )
 
+try:
+    from src.services.scheduler_tracker import record_job_execution
+
+    TRACKER_AVAILABLE = True
+except ImportError:
+    TRACKER_AVAILABLE = False
+
 
 class Scheduler:
     def __init__(
@@ -81,8 +88,6 @@ class Scheduler:
             self.scheduler.start()
             self._is_running = True
             self.logger.info("Scheduler started successfully")
-
-            asyncio.create_task(self._health_check_loop())
 
         except Exception as e:
             self.logger.error(f"Failed to start scheduler: {e}")
@@ -276,7 +281,8 @@ class Scheduler:
         return wrapper
 
     def _job_executed(self, event) -> None:
-        """Обработка успешно завершенных задач."""
+        if TRACKER_AVAILABLE:
+            record_job_execution(event.job_id)
         self.job_stats["executed"] += 1
         self.job_stats["last_execution"] = datetime.now(
             settings.SCHEDULER_TIMEZONE
@@ -302,18 +308,6 @@ class Scheduler:
             if not running_jobs:
                 break
             await asyncio.sleep(1)
-
-    async def _health_check_loop(self) -> None:
-        """Health check планировщика."""
-        while self._is_running:
-            try:
-                await asyncio.sleep(300)  # Проверка каждые 5 минут
-                if self._is_running:
-                    await self._scheduler_health_check()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Health check loop error: {e}")
 
     def pause_job(self, job_id: str) -> bool:
         """Пауза конкретной задачи."""

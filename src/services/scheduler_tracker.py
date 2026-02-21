@@ -21,12 +21,21 @@ class SchedulerTracker:
         self._initialized = True
         self._jobs: list[dict[str, Any]] = []
         self._scheduler_running = False
+        self._execution_counts: dict[str, int] = {}
         self._lock = Lock()
 
     def update_jobs(self, jobs: list[dict[str, Any]], scheduler_running: bool) -> None:
         with self._lock:
             self._jobs = jobs
             self._scheduler_running = scheduler_running
+
+    def record_execution(self, job_id: str) -> None:
+        with self._lock:
+            self._execution_counts[job_id] = self._execution_counts.get(job_id, 0) + 1
+
+    def get_execution_count(self, job_id: str) -> int:
+        with self._lock:
+            return self._execution_counts.get(job_id, 0)
 
     def _get_next_jobs_unlocked(self, limit: int = 5) -> list[dict[str, Any]]:
         if not self._scheduler_running or not self._jobs:
@@ -49,6 +58,7 @@ class SchedulerTracker:
                             "name": job["name"],
                             "next_run": next_run,
                             "seconds_until": seconds_until,
+                            "executions": self._execution_counts.get(job["id"], 0),
                         }
                     )
             except (ValueError, TypeError):
@@ -77,6 +87,10 @@ scheduler_tracker = SchedulerTracker()
 
 def update_scheduler_jobs(jobs: list[dict[str, Any]], scheduler_running: bool) -> None:
     scheduler_tracker.update_jobs(jobs, scheduler_running)
+
+
+def record_job_execution(job_id: str) -> None:
+    scheduler_tracker.record_execution(job_id)
 
 
 def get_scheduler_tracker() -> SchedulerTracker:
