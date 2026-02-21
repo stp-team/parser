@@ -24,7 +24,6 @@ from src.tasks.ure import (
     fill_day_kpi,
     fill_month_kpi,
     fill_week_kpi,
-    update_all_kpi_user_id_and_questions,
 )
 
 

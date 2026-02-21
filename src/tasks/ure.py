@@ -19,10 +19,10 @@ from okc_py.api.models.ure import (
 from okc_py.api.repos.thanks import ThanksAPI
 from sqlalchemy import and_, delete, func, select
 from stp_database.models.Questions.question import Question
-from stp_database.models.STP.employee import Employee
 from stp_database.models.Stats import SpecDayKPI, SpecMonthKPI, SpecWeekKPI
+from stp_database.models.STP.employee import Employee
 
-from src.core.db import get_questions_session, get_stp_session, get_stats_session
+from src.core.db import get_questions_session, get_stats_session, get_stp_session
 from src.services.helpers import (
     get_month_period_for_kpi,
     get_week_start_date,
@@ -384,8 +384,12 @@ async def fill_day_kpi(api: UreAPI) -> None:
     logger.info(f"Daily KPI data update completed: {count} records")
 
     # Update with user_id and questions count after filling
-    update_count = await update_kpi_with_user_id_and_questions(SpecDayKPI, extraction_date)
-    logger.info(f"Daily KPI user_id and questions update completed: {update_count} records")
+    update_count = await update_kpi_with_user_id_and_questions(
+        SpecDayKPI, extraction_date
+    )
+    logger.info(
+        f"Daily KPI user_id and questions update completed: {update_count} records"
+    )
 
 
 @log_processing_time("Weekly KPI data processing")
@@ -403,8 +407,12 @@ async def fill_week_kpi(api: UreAPI) -> None:
     logger.info(f"Weekly KPI data update completed: {count} records")
 
     # Update with user_id and questions count after filling
-    update_count = await update_kpi_with_user_id_and_questions(SpecWeekKPI, extraction_date)
-    logger.info(f"Weekly KPI user_id and questions update completed: {update_count} records")
+    update_count = await update_kpi_with_user_id_and_questions(
+        SpecWeekKPI, extraction_date
+    )
+    logger.info(
+        f"Weekly KPI user_id and questions update completed: {update_count} records"
+    )
 
 
 @log_processing_time("Monthly KPI data processing")
@@ -418,8 +426,12 @@ async def fill_month_kpi(api: UreAPI) -> None:
     logger.info(f"Monthly KPI data update completed: {count} records")
 
     # Update with user_id and questions count after filling
-    update_count = await update_kpi_with_user_id_and_questions(SpecMonthKPI, extraction_date)
-    logger.info(f"Monthly KPI user_id and questions update completed: {update_count} records")
+    update_count = await update_kpi_with_user_id_and_questions(
+        SpecMonthKPI, extraction_date
+    )
+    logger.info(
+        f"Monthly KPI user_id and questions update completed: {update_count} records"
+    )
 
 
 @log_processing_time("All KPI data processing")
@@ -458,7 +470,9 @@ async def update_kpi_with_user_id_and_questions(
             row.employee_id: row.user_id for row in employee_result.fetchall()
         }
 
-    logger.info(f"[{model_name}] Found {len(employee_user_map)} employee -> user mappings")
+    logger.info(
+        f"[{model_name}] Found {len(employee_user_map)} employee -> user mappings"
+    )
 
     if not employee_user_map:
         logger.warning(f"[{model_name}] No employee-user mappings found")
@@ -467,23 +481,27 @@ async def update_kpi_with_user_id_and_questions(
     # Step 3: Calculate period boundaries for questions query
     if model_name == "SpecDayKPI":
         # For daily KPI, questions from start of day to end of day
-        period_start = extraction_period.replace(hour=0, minute=0, second=0, microsecond=0)
+        period_start = extraction_period.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         period_end = period_start + timedelta(days=1)
     elif model_name == "SpecWeekKPI":
         # For weekly KPI, questions from start of week to end of week (7 days)
-        period_start = extraction_period.replace(hour=0, minute=0, second=0, microsecond=0)
+        period_start = extraction_period.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         period_end = period_start + timedelta(days=7)
     else:  # SpecMonthKPI
         # For monthly KPI, questions from start of month to start of next month
-        period_start = extraction_period.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        period_start = extraction_period.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
         if extraction_period.month == 12:
             period_end = period_start.replace(year=extraction_period.year + 1, month=1)
         else:
             period_end = period_start.replace(month=extraction_period.month + 1)
 
-    logger.info(
-        f"[{model_name}] Query period: {period_start} to {period_end}"
-    )
+    logger.info(f"[{model_name}] Query period: {period_start} to {period_end}")
 
     # Step 4: Fetch questions for the period
     async with get_questions_session() as questions_session:
@@ -520,7 +538,9 @@ async def update_kpi_with_user_id_and_questions(
                 questions_answered_map.get(duty_id, 0) + count
             )
         if employee_id:
-            questions_asked_map[employee_id] = questions_asked_map.get(employee_id, 0) + count
+            questions_asked_map[employee_id] = (
+                questions_asked_map.get(employee_id, 0) + count
+            )
 
     logger.info(
         f"[{model_name}] Found {len(questions_answered_map)} users with answered questions "
@@ -541,7 +561,9 @@ async def update_kpi_with_user_id_and_questions(
         logger.info(f"[{model_name}] Found {len(kpi_records)} KPI records for period")
 
         if not kpi_records:
-            logger.warning(f"[{model_name}] No KPI records found for period {extraction_period}")
+            logger.warning(
+                f"[{model_name}] No KPI records found for period {extraction_period}"
+            )
             return 0
 
         for kpi in kpi_records:
@@ -567,7 +589,9 @@ async def update_kpi_with_user_id_and_questions(
 async def update_day_kpi_user_id_and_questions() -> int:
     """Update daily KPI records with user_id and questions count."""
     extraction_date = get_yesterday_date()
-    logger.info(f"Starting daily KPI user_id and questions update for {extraction_date}")
+    logger.info(
+        f"Starting daily KPI user_id and questions update for {extraction_date}"
+    )
     count = await update_kpi_with_user_id_and_questions(SpecDayKPI, extraction_date)
     logger.info(f"Daily KPI user_id and questions update completed: {count} records")
     return count
@@ -577,7 +601,9 @@ async def update_day_kpi_user_id_and_questions() -> int:
 async def update_week_kpi_user_id_and_questions() -> int:
     """Update weekly KPI records with user_id and questions count."""
     extraction_date = get_week_start_date()
-    logger.info(f"Starting weekly KPI user_id and questions update for {extraction_date}")
+    logger.info(
+        f"Starting weekly KPI user_id and questions update for {extraction_date}"
+    )
     count = await update_kpi_with_user_id_and_questions(SpecWeekKPI, extraction_date)
     logger.info(f"Weekly KPI user_id and questions update completed: {count} records")
     return count
@@ -587,7 +613,9 @@ async def update_week_kpi_user_id_and_questions() -> int:
 async def update_month_kpi_user_id_and_questions() -> int:
     """Update monthly KPI records with user_id and questions count."""
     extraction_date = get_month_period_for_kpi()
-    logger.info(f"Starting monthly KPI user_id and questions update for {extraction_date}")
+    logger.info(
+        f"Starting monthly KPI user_id and questions update for {extraction_date}"
+    )
     count = await update_kpi_with_user_id_and_questions(SpecMonthKPI, extraction_date)
     logger.info(f"Monthly KPI user_id and questions update completed: {count} records")
     return count
@@ -603,4 +631,6 @@ async def update_all_kpi_user_id_and_questions() -> None:
         update_month_kpi_user_id_and_questions(),
     )
     total = sum(results)
-    logger.info(f"Full KPI user_id and questions update completed: {total} total records")
+    logger.info(
+        f"Full KPI user_id and questions update completed: {total} total records"
+    )
