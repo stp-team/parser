@@ -9,6 +9,14 @@ from stp_database.models.Stats import TutorsSchedule
 from src.core.db import get_stats_session
 from src.tasks.base import log_processing_time
 
+# Optional API tracking
+try:
+    from src.services.api_tracker import track_api_call, track_db_write
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +81,8 @@ async def fetch_tutor_graph(
     stop_date: str,
 ) -> list | None:
     """Fetch tutor graph from API."""
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/tutors/full-graph", "GET")
     result = await api.get_full_graph(
         division_id=2,
         start_date=start_date,
@@ -137,6 +147,10 @@ async def save_tutor_schedules(schedules: list[TutorsSchedule]) -> int:
 
         session.add_all(schedules)
         await session.commit()
+
+        # Track DB write
+        if API_TRACKING_AVAILABLE and schedules:
+            track_db_write("tutors_schedule")
 
     logger.info(f"[Tutors] Successfully saved {len(schedules)} schedules")
     return len(schedules)

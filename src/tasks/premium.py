@@ -15,6 +15,14 @@ from src.tasks.base import (
     log_processing_time,
 )
 
+# Optional API tracking
+try:
+    from src.services.api_tracker import track_api_call
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +106,9 @@ async def fill_premium(
     )
 
     async def fetch(period: str, division: str):
+        endpoint = "/api/premium/heads" if is_head else "/api/premium/specialists"
+        if API_TRACKING_AVAILABLE:
+            track_api_call(endpoint, "GET")
         if is_head:
             return await api.get_head_premium(period, division)
         return await api.get_specialist_premium(period, division)

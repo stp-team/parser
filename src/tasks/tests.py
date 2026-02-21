@@ -9,6 +9,14 @@ from stp_database.models.Stats import AssignedTest
 from src.core.db import get_stats_session
 from src.tasks.base import PeriodHelper, log_processing_time
 
+# Optional API tracking
+try:
+    from src.services.api_tracker import track_api_call, track_db_write
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +45,8 @@ async def fetch_assigned_tests(
     stop_date: str,
 ) -> list[APIAssignedTest] | None:
     """Fetch assigned tests from API."""
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/tests/assigned", "GET")
     return await api.get_assigned_tests(
         start_date=start_date,
         stop_date=stop_date,
@@ -69,6 +79,10 @@ async def save_assigned_tests(tests: list[AssignedTest]) -> int:
         await session.execute(delete(AssignedTest))
         session.add_all(tests)
         await session.commit()
+
+        # Track DB write
+        if API_TRACKING_AVAILABLE and tests:
+            track_db_write("assigned_tests")
 
     return len(tests)
 

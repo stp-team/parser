@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     SCHEDULER_TIMEZONE: DstTzInfo = pytz.timezone("Asia/Yekaterinburg")
     SCHEDULER_JOB_STORE_URL: str = ""
 
+    # Dashboard settings
+    ENABLE_DASHBOARD: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

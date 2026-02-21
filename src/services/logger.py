@@ -6,9 +6,21 @@ from pathlib import Path
 
 import betterlogging as bl
 
+# Optional dashboard import - only available when rich is installed
+try:
+    from src.services.cli_dashboard import get_dashboard
 
-def setup_logging() -> None:
-    """Настраивает логирование в проекте."""
+    DASHBOARD_AVAILABLE = True
+except ImportError:
+    DASHBOARD_AVAILABLE = False
+
+
+def setup_logging(use_dashboard: bool = True) -> None:
+    """Настраивает логирование в проекте.
+
+    Args:
+        use_dashboard: Whether to use CLI dashboard (requires rich package)
+    """
     log_level = logging.INFO
 
     # Создаем директорию для логов, если она не существует
@@ -22,10 +34,23 @@ def setup_logging() -> None:
     # Настройка цветного вывода в консоль
     bl.basic_colorized_config(level=log_level)
 
-    # Консольный хендлер
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
+    # Настройка корневого логгера
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Очистка существующих хендлеров
+    root_logger.handlers.clear()
+
+    # Add dashboard handler if available and requested
+    if use_dashboard and DASHBOARD_AVAILABLE:
+        try:
+            dashboard = get_dashboard()
+            dashboard_handler = dashboard.get_log_handler()
+            dashboard_handler.setLevel(log_level)
+            root_logger.addHandler(dashboard_handler)
+        except Exception as e:
+            # If dashboard setup fails, fall back to console handler
+            logging.warning(f"Failed to setup dashboard handler: {e}")
 
     # Файловый хендлер с ротацией (каждый день, хранить 2 дня)
     file_handler = TimedRotatingFileHandler(
@@ -38,12 +63,4 @@ def setup_logging() -> None:
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     file_handler.suffix = "%Y-%m-%d.log"  # Формат имени ротированного файла
-
-    # Настройка корневого логгера
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-
-    # Очистка существующих хендлеров и добавление новых
-    root_logger.handlers.clear()
-    root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)

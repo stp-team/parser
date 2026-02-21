@@ -30,6 +30,14 @@ from src.services.helpers import (
 )
 from src.tasks.base import BatchDBOperator, ConcurrentAPIFetcher, log_processing_time
 
+# Optional API tracking
+try:
+    from src.services.api_tracker import track_api_call
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 REPORT_TYPES = {
@@ -208,6 +216,11 @@ async def fetch_kpi_reports(
 
     async def fetch_kpi(division: str, report_type: str):
         try:
+            if API_TRACKING_AVAILABLE:
+                endpoint = (
+                    "/api/ure/kpi/custom" if start_date else "/api/ure/kpi/period"
+                )
+                track_api_call(endpoint, "GET")
             if start_date:
                 result = await api.get_custom_period_kpi(
                     division=division,
@@ -247,6 +260,8 @@ async def fetch_thanks_reports(
 
     async def fetch_thanks(division: int):
         try:
+            if API_TRACKING_AVAILABLE:
+                track_api_call("/api/thanks/report", "GET")
             result = await thanks_api.get_report(
                 whom_units=[division],
                 start_date=start_date,

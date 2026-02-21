@@ -10,6 +10,14 @@ from stp_database.models.STP import Employee
 from src.core.db import get_stp_session
 from src.tasks.base import ConcurrentAPIFetcher, PeriodHelper, log_processing_time
 
+# Optional API tracking
+try:
+    from src.services.api_tracker import track_api_call
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +51,8 @@ async def fetch_employee_details_concurrent(
     """
 
     async def fetch_detail(employee_id: int):
+        if API_TRACKING_AVAILABLE:
+            track_api_call("/api/dossier/employee", "GET")
         return await dossier_api.get_employee(employee_id=employee_id, **api_kwargs)
 
     # Extract employee_id from database Employee objects
@@ -60,6 +70,8 @@ async def fetch_employee_details_concurrent(
 async def update_birthdays(dossier_api: DossierAPI) -> int:
     """Update employee birthdays from DossierAPI."""
     logger.info("[Employees] Starting employee birthdays update")
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/dossier/employees", "GET")
     employees_data = await dossier_api.get_employees(exclude_fired=True)
     if not employees_data:
         logger.warning("[Employees] No employees data received from API")
@@ -157,6 +169,8 @@ async def update_employee_ids(dossier_api: DossierAPI) -> int:
     )
 
     # Get all employees from API (single call) - the API response includes the employee ID
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/dossier/employees", "GET")
     employees_data = await dossier_api.get_employees(exclude_fired=True)
     if not employees_data:
         logger.warning("[Employees] No employees data received from API")
@@ -270,6 +284,8 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
     logger.info("[Employees] Starting tutor information update")
 
     # Get filters
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/tutors/filters", "GET")
     graph_filters = await tutors_api.get_filters(division_id=2)
     if not graph_filters:
         logger.warning("[Employees] No graph filters received from API")
@@ -293,6 +309,8 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
     picked_tutor_types = [t.id for t in graph_filters.tutor_types]
     picked_shift_types = [s.id for s in graph_filters.shift_types]
 
+    if API_TRACKING_AVAILABLE:
+        track_api_call("/api/tutors/full-graph", "GET")
     tutor_graph = await tutors_api.get_full_graph(
         division_id=2,
         start_date=start_date,

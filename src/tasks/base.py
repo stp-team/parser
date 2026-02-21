@@ -8,6 +8,14 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Optional API tracker import
+try:
+    from src.services.api_tracker import track_api_call, track_db_write
+
+    API_TRACKING_AVAILABLE = True
+except ImportError:
+    API_TRACKING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +117,12 @@ class BatchDBOperator:
             return 0
 
         try:
+            # Track DB write
+            if API_TRACKING_AVAILABLE and data_list:
+                # Get table name from first object
+                table_name = data_list[0].__class__.__tablename__
+                track_db_write(table_name)
+
             if delete_func:
                 await delete_func()
 

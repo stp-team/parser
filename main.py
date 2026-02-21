@@ -16,11 +16,28 @@ from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
 from src.tasks.ure import fill_kpi
 
+# Optional dashboard import
+try:
+    from src.services.cli_dashboard import get_dashboard
+
+    DASHBOARD_AVAILABLE = True
+except ImportError:
+    DASHBOARD_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
 async def main():
-    setup_logging()
+    # Setup logging with dashboard if available
+    use_dashboard = DASHBOARD_AVAILABLE and settings.ENABLE_DASHBOARD
+    setup_logging(use_dashboard=use_dashboard)
+
+    # Start dashboard if available
+    dashboard = None
+    if use_dashboard:
+        dashboard = get_dashboard()
+        dashboard.start()
+
     logger.info("Запуск парсера...")
 
     okc_client = OKC(
@@ -77,17 +94,16 @@ async def main():
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
 
-            if settings.ENVIRONMENT != "dev":
-                # Заполнение данных при старте
-                logger.info("Запуск получения данных при старте парсера...")
-                await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
-                await fill_kpi(okc_client.api.ure)
-                await fill_heads_premium(okc_client.api.premium)
-                await fill_specialists_premium(okc_client.api.premium)
-                await fill_tutor_schedule(okc_client.api.tutors)
-                await fill_sl(okc_client.api.sl)
-                await fill_assigned_tests(okc_client.api.tests)
-                logger.info("Получение данных при старте завершено")
+            # Заполнение данных при старте
+            logger.info("Запуск получения данных при старте парсера...")
+            await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
+            await fill_kpi(okc_client.api.ure)
+            await fill_heads_premium(okc_client.api.premium)
+            await fill_specialists_premium(okc_client.api.premium)
+            await fill_tutor_schedule(okc_client.api.tutors)
+            await fill_sl(okc_client.api.sl)
+            await fill_assigned_tests(okc_client.api.tests)
+            logger.info("Получение данных при старте завершено")
 
             try:
                 while True:
@@ -120,6 +136,10 @@ async def main():
             logger.warning(f"Ошибка при закрытии NATS соединения: {e}")
 
         await okc_client.close()
+
+        # Stop dashboard
+        if dashboard:
+            dashboard.stop()
 
 
 if __name__ == "__main__":
