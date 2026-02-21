@@ -131,7 +131,7 @@ class Scheduler:
         """Настройка задач, связанных с сотрудниками."""
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employee_ids, "employees_ids"),
-            trigger=IntervalTrigger(hours=2),
+            trigger=IntervalTrigger(hours=24),
             args=[self.okc_client.api.dossier],
             id="employees_ids",
             name="Заполнение идентификатора OKC",
@@ -140,7 +140,7 @@ class Scheduler:
 
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_birthdays, "employees_birthdays"),
-            trigger=IntervalTrigger(hours=2),
+            trigger=IntervalTrigger(hours=24),
             args=[self.okc_client.api.dossier],
             id="employees_birthdays",
             name="Заполнение дней рождений",
@@ -149,7 +149,7 @@ class Scheduler:
 
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employment_dates, "employees_employment_dates"),
-            trigger=IntervalTrigger(hours=2),
+            trigger=IntervalTrigger(hours=24),
             args=[self.okc_client.api.dossier],
             id="employees_employment_dates",
             name="Заполнение дат трудоустройства",

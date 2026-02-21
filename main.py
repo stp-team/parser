@@ -16,7 +16,6 @@ from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
 from src.tasks.ure import fill_kpi
 
-# Optional dashboard import
 try:
     from src.services.cli_dashboard import get_dashboard
     from src.services.scheduler_tracker import update_scheduler_jobs
@@ -25,24 +24,15 @@ try:
 except ImportError:
     DASHBOARD_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
-
 
 async def main():
-    # Create dashboard instance BEFORE setting up logging
-    dashboard = None
     use_dashboard = DASHBOARD_AVAILABLE and settings.ENABLE_DASHBOARD
+    dashboard = get_dashboard() if use_dashboard else None
 
-    if use_dashboard:
-        dashboard = get_dashboard()
-
-    # Setup logging with dashboard if available
     setup_logging(use_dashboard=use_dashboard)
-
     logger = logging.getLogger(__name__)
 
-    # Start dashboard after logging is setup
-    if use_dashboard and dashboard:
+    if dashboard:
         logger.info("Starting dashboard...")
         dashboard.start()
         logger.info("Dashboard started successfully")
@@ -52,41 +42,22 @@ async def main():
     okc_client = OKC(
         username=settings.OKC_USERNAME,
         password=settings.OKC_PASSWORD,
-        settings=Settings(
-            BASE_URL=settings.OKC_BASE_URL,
-        ),
+        settings=Settings(BASE_URL=settings.OKC_BASE_URL),
     )
+
     try:
         await okc_client.connect()
 
-        # Инициализация и настройка NATS
-        # try:
-        #     await nats_client.connect()
-        #     await setup_nats_router(okc_client=okc_client)
-        #     await nats_client.subscribe_to_commands()
-        #     logger.info("NATS client и router настроены")
-        #
-        #     # Setup WebSocket bridges for real-time lines data
-        #     try:
-        #         await setup_ws_bridges(
-        #             okc_client=okc_client,
-        #             lines=settings.WS_LINES,
-        #         )
-        #         logger.info(
-        #             f"WebSocket bridges настроены для линий: {settings.WS_LINES}"
-        #         )
-        #     except Exception as e:
-        #         logger.warning(f"Не удалось настроить WebSocket bridges: {e}")
-        #
-        # except Exception as e:
-        #     logger.warning(f"Не удалось настроить NATS: {e}")
+        db_url = (
+            settings.SCHEDULER_JOB_STORE_URL
+            if settings.SCHEDULER_ENABLE_PERSISTENCE
+            and settings.SCHEDULER_JOB_STORE_URL
+            else None
+        )
 
-        db_url = None
-        if settings.SCHEDULER_ENABLE_PERSISTENCE and settings.SCHEDULER_JOB_STORE_URL:
-            db_url = settings.SCHEDULER_JOB_STORE_URL
+        if db_url:
             logger.info(f"Scheduler persistence enabled with DB: {db_url}")
 
-        # Инициализация планировщика
         scheduler = Scheduler(
             okc_client=okc_client,
             db_url=db_url,
@@ -103,7 +74,6 @@ async def main():
                     f"  - {job['name']} (ID: {job['id']}) - Next run: {job['next_run']}"
                 )
 
-            # Заполнение данных при старте
             logger.info("Запуск получения данных при старте парсера...")
             await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
             await fill_kpi(okc_client.api.ure)
@@ -118,10 +88,11 @@ async def main():
                 while True:
                     await asyncio.sleep(2)
 
-                    # Update scheduler tracker for dashboard
                     if DASHBOARD_AVAILABLE:
                         status = scheduler.get_job_status()
-                        update_scheduler_jobs(status["jobs"], status["scheduler_running"])
+                        update_scheduler_jobs(
+                            status["jobs"], status["scheduler_running"]
+                        )
 
                     if logger.isEnabledFor(logging.DEBUG):
                         status = scheduler.get_job_status()
@@ -130,7 +101,7 @@ async def main():
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received. Shutting down gracefully...")
             except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}")
+                logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
                 raise
 
     except Exception as e:
@@ -138,17 +109,13 @@ async def main():
         raise
 
     finally:
-        # Stop dashboard first (so we can see cleanup messages)
         if dashboard:
             try:
                 dashboard.stop()
-                # Give thread a moment to exit
                 await asyncio.sleep(0.2)
-            except Exception as e:
-                # Ignore dashboard errors during shutdown
+            except Exception:
                 pass
 
-        # Очистка ресурсов
         try:
             await cleanup_ws_bridges()
         except Exception as e:
