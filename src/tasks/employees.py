@@ -46,9 +46,6 @@ async def fetch_employee_details_concurrent(
 ) -> list:
     """Fetch employee details concurrently using ConcurrentAPIFetcher.
 
-    IMPORTANT: This function expects database Employee objects with 'employee_id' attribute.
-    The DossierAPI.get_employee() method requires employee_id (OKC ID).
-
     Returns:
         List of results in the SAME ORDER as input employees.
         None values are used for employees without employee_id or failed requests.
@@ -80,36 +77,6 @@ async def fetch_employee_details_concurrent(
         ordered_results[original_idx] = result
 
     return ordered_results
-
-
-@log_processing_time("Employee birthdays update")
-async def update_birthdays(dossier_api: DossierAPI) -> int:
-    """Update employee birthdays from DossierAPI."""
-    logger.info("[Employees] Starting employee birthdays update")
-    if API_TRACKING_AVAILABLE:
-        track_api_call("/api/dossier/employees", "GET")
-    employees_data = await dossier_api.get_employees(exclude_fired=True)
-    if not employees_data:
-        logger.warning("[Employees] No employees data received from API")
-        return 0
-
-    logger.info(f"[Employees] Processing {len(employees_data)} employees")
-
-    updated_count = 0
-    async with get_stp_session() as session:
-        for emp_pydantic in employees_data:
-            if not emp_pydantic.fullname:
-                continue
-
-            db_emp = await find_employee_by_fullname(session, emp_pydantic.fullname)
-            if db_emp and emp_pydantic.fired_date:
-                db_emp.fired_date = parse_date(emp_pydantic.fired_date)
-                updated_count += 1
-
-        await session.commit()
-
-    logger.info(f"[Employees] Updated {updated_count} employee records")
-    return updated_count
 
 
 @log_processing_time("Employee employment dates update")
@@ -213,11 +180,11 @@ async def update_employee_ids(dossier_api: DossierAPI) -> int:
 
 @log_processing_time("All employee data update")
 async def update_all_employee_data(dossier_api: DossierAPI) -> int:
-    """Update all employee data (employee_id, employment dates, birthdays) - only for employees missing data.
+    """Update all employee data (employee_id, employment dates) - only for employees missing data.
 
     This function:
     1. Fills in employee_id for employees missing it (calls get_employees once)
-    2. Fetches detailed data (employment_date, birthday) for employees with employee_id
+    2. Fetches detailed data (employment_date) for employees with employee_id
     """
     logger.info("[Employees] Starting comprehensive employee data update")
 
@@ -225,11 +192,11 @@ async def update_all_employee_data(dossier_api: DossierAPI) -> int:
     logger.info("[Employees] Step 1: Filling missing employee_id values")
     await update_employee_ids(dossier_api)
 
-    # Step 2: Get employees from database that are missing employment_date or birthday
+    # Step 2: Get employees from database that are missing employment_date
     # and already have employee_id set
     async with get_stp_session() as session:
         stmt = select(Employee).where(
-            (Employee.employment_date.is_(None) | Employee.birthday.is_(None)),
+            Employee.employment_date.is_(None),
             Employee.employee_id.is_not(None),
         )
         result = await session.execute(stmt)
@@ -237,12 +204,12 @@ async def update_all_employee_data(dossier_api: DossierAPI) -> int:
 
     if not db_employees_needing_update:
         logger.info(
-            "[Employees] No employees missing employment_date or birthday (with employee_id)"
+            "[Employees] No employees missing employment_date (with employee_id)"
         )
         return 0
 
     logger.info(
-        f"[Employees] Found {len(db_employees_needing_update)} employees missing employment_date/birthday"
+        f"[Employees] Found {len(db_employees_needing_update)} employees missing employment_date"
     )
 
     # Step 3: Fetch detailed data using employee_id from database
@@ -278,16 +245,10 @@ async def update_all_employee_data(dossier_api: DossierAPI) -> int:
                 if db_emp.employment_date:
                     updated_count += 1
 
-            # Update birthday if missing
-            if info.birthday and not db_emp.birthday:
-                db_emp.birthday = parse_date(info.birthday)
-                if db_emp.birthday:
-                    updated_count += 1
-
         await session.commit()
 
     logger.info(
-        f"[Employees] Updated {updated_count} employee records with employment_date/birthday"
+        f"[Employees] Updated {updated_count} employee records with employment_date"
     )
     return updated_count
 
@@ -402,11 +363,6 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
         f"({not_found_count} tutors not found in DB)"
     )
     return updated_count
-
-
-async def fill_birthdays(dossier_api: DossierAPI) -> int:
-    """Fill employee birthdays."""
-    return await update_birthdays(dossier_api)
 
 
 async def fill_employment_dates(dossier_api: DossierAPI) -> int:

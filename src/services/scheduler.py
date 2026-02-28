@@ -13,7 +13,6 @@ from okc_py import OKC
 
 from src.core.config import settings
 from src.tasks.employees import (
-    fill_birthdays,
     fill_employee_ids,
     fill_employment_dates,
 )
@@ -140,15 +139,6 @@ class Scheduler:
             args=[self.okc_client.api.dossier],
             id="employees_ids",
             name="Заполнение идентификатора OKC",
-            replace_existing=True,
-        )
-
-        self.scheduler.add_job(
-            self._safe_job_wrapper(fill_birthdays, "employees_birthdays"),
-            trigger=IntervalTrigger(hours=24),
-            args=[self.okc_client.api.dossier],
-            id="employees_birthdays",
-            name="Заполнение дней рождений",
             replace_existing=True,
         )
 
