@@ -48,6 +48,10 @@ async def fetch_employee_details_concurrent(
 
     IMPORTANT: This function expects database Employee objects with 'employee_id' attribute.
     The DossierAPI.get_employee() method requires employee_id (OKC ID).
+
+    Returns:
+        List of results in the SAME ORDER as input employees.
+        None values are used for employees without employee_id or failed requests.
     """
 
     async def fetch_detail(employee_id: int):
@@ -55,15 +59,27 @@ async def fetch_employee_details_concurrent(
             track_api_call("/api/dossier/employee", "GET")
         return await dossier_api.get_employee(employee_id=employee_id, **api_kwargs)
 
-    # Extract employee_id from database Employee objects
-    tasks = [
-        (e.employee_id,)
-        for e in employees
+    # Create list of (index, employee_id) for employees with valid IDs
+    indexed_tasks = [
+        (idx, e.employee_id)
+        for idx, e in enumerate(employees)
         if hasattr(e, "employee_id") and e.employee_id
     ]
+
+    if not indexed_tasks:
+        return [None] * len(employees)
+
+    # Fetch details for employees with valid IDs
     fetcher = ConcurrentAPIFetcher(semaphore_limit=semaphore_limit)
+    tasks = [(emp_id,) for _, emp_id in indexed_tasks]
     results = await fetcher.fetch_parallel(tasks, fetch_detail)
-    return [result for _, result in results if result is not None]
+
+    # Build result list in original order, with None for missing/failed
+    ordered_results = [None] * len(employees)
+    for (original_idx, _), (_, result) in zip(indexed_tasks, results):
+        ordered_results[original_idx] = result
+
+    return ordered_results
 
 
 @log_processing_time("Employee birthdays update")
