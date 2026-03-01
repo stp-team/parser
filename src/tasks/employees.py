@@ -4,7 +4,7 @@ from typing import Any
 
 from okc_py import DossierAPI, TutorsAPI
 from okc_py.api.models.dossier import EmployeeInfo
-from sqlalchemy import select
+from sqlalchemy import select, update
 from stp_database.models.STP import Employee
 
 from src.core.db import get_stp_session
@@ -110,23 +110,37 @@ async def update_employment_dates(dossier_api: DossierAPI) -> int:
         dossier_api, db_employees_needing_update, semaphore_limit=10
     )
 
-    # Update database
+    # Build list of updates to perform
+    updates_to_perform = []
+    for db_emp, emp_detail in zip(
+        db_employees_needing_update, emp_details, strict=True
+    ):
+        if not emp_detail or not emp_detail.employeeInfo:
+            continue
+
+        info = emp_detail.employeeInfo
+
+        if info.employment_date:
+            parsed_date = parse_date(info.employment_date)
+            if parsed_date:
+                updates_to_perform.append(
+                    {"employee_id": db_emp.employee_id, "employment_date": parsed_date}
+                )
+
+    # Perform bulk updates using update statements
     updated_count = 0
-    async with get_stp_session() as session:
-        for db_emp, emp_detail in zip(
-            db_employees_needing_update, emp_details, strict=True
-        ):
-            if not emp_detail or not emp_detail.employeeInfo:
-                continue
-
-            info = emp_detail.employeeInfo
-
-            if info.employment_date:
-                db_emp.employment_date = parse_date(info.employment_date)
-                if db_emp.employment_date:
+    if updates_to_perform:
+        async with get_stp_session() as session:
+            for update_data in updates_to_perform:
+                stmt = (
+                    update(Employee)
+                    .where(Employee.employee_id == update_data["employee_id"])
+                    .values(employment_date=update_data["employment_date"])
+                )
+                result = await session.execute(stmt)
+                if result.rowcount > 0:
                     updated_count += 1
-
-        await session.commit()
+            await session.commit()
 
     logger.info(f"[Employees] Updated {updated_count} employment dates")
     return updated_count
@@ -163,18 +177,42 @@ async def update_employee_ids(dossier_api: DossierAPI) -> int:
 
     # Match by fullname and update employee_id
     api_employees_by_fullname = {e.fullname: e for e in employees_data if e.fullname}
+
+    # Build list of updates to perform
+    updates_to_perform = []
+    not_found_count = 0
+    not_found_employees = []
+
+    for db_emp in db_employees_needing_update:
+        if db_emp.fullname in api_employees_by_fullname:
+            api_emp = api_employees_by_fullname[db_emp.fullname]
+            updates_to_perform.append(
+                {"fullname": db_emp.fullname, "employee_id": api_emp.id}
+            )
+        else:
+            not_found_count += 1
+            not_found_employees.append(db_emp.fullname)
+
+    # Perform bulk updates using update statements
     updated_count = 0
-
-    async with get_stp_session() as session:
-        for db_emp in db_employees_needing_update:
-            if db_emp.fullname in api_employees_by_fullname:
-                api_emp = api_employees_by_fullname[db_emp.fullname]
-                db_emp.employee_id = api_emp.id
-                updated_count += 1
-
-        await session.commit()
+    if updates_to_perform:
+        async with get_stp_session() as session:
+            for update_data in updates_to_perform:
+                stmt = (
+                    update(Employee)
+                    .where(Employee.fullname == update_data["fullname"])
+                    .values(employee_id=update_data["employee_id"])
+                )
+                result = await session.execute(stmt)
+                if result.rowcount > 0:
+                    updated_count += 1
+            await session.commit()
 
     logger.info(f"[Employees] Updated {updated_count} employee IDs")
+    if not_found_count > 0:
+        logger.warning(
+            f"[Employees] {not_found_count} employees not found in API: {not_found_employees}"
+        )
     return updated_count
 
 
@@ -224,28 +262,42 @@ async def update_all_employee_data(dossier_api: DossierAPI) -> int:
         show_criticals=False,
     )
 
-    # Step 4: Update database
+    # Step 4: Build list of updates to perform
+    updates_to_perform = []
+    for db_emp, emp_detail in zip(
+        db_employees_needing_update, emp_details, strict=True
+    ):
+        if not emp_detail or not emp_detail.employeeInfo:
+            if isinstance(emp_detail, Exception):
+                logger.warning(
+                    f"[Employees] Error fetching employee_id={db_emp.employee_id}: {emp_detail}"
+                )
+            continue
+
+        info: EmployeeInfo = emp_detail.employeeInfo
+
+        # Update employment_date if missing
+        if info.employment_date and not db_emp.employment_date:
+            parsed_date = parse_date(info.employment_date)
+            if parsed_date:
+                updates_to_perform.append(
+                    {"employee_id": db_emp.employee_id, "employment_date": parsed_date}
+                )
+
+    # Step 5: Perform bulk updates using update statements
     updated_count = 0
-    async with get_stp_session() as session:
-        for db_emp, emp_detail in zip(
-            db_employees_needing_update, emp_details, strict=True
-        ):
-            if not emp_detail or not emp_detail.employeeInfo:
-                if isinstance(emp_detail, Exception):
-                    logger.warning(
-                        f"[Employees] Error fetching employee_id={db_emp.employee_id}: {emp_detail}"
-                    )
-                continue
-
-            info: EmployeeInfo = emp_detail.employeeInfo
-
-            # Update employment_date if missing
-            if info.employment_date and not db_emp.employment_date:
-                db_emp.employment_date = parse_date(info.employment_date)
-                if db_emp.employment_date:
+    if updates_to_perform:
+        async with get_stp_session() as session:
+            for update_data in updates_to_perform:
+                stmt = (
+                    update(Employee)
+                    .where(Employee.employee_id == update_data["employee_id"])
+                    .values(employment_date=update_data["employment_date"])
+                )
+                result = await session.execute(stmt)
+                if result.rowcount > 0:
                     updated_count += 1
-
-        await session.commit()
+            await session.commit()
 
     logger.info(
         f"[Employees] Updated {updated_count} employee records with employment_date"
@@ -340,7 +392,10 @@ async def update_tutor_info(tutors_api: TutorsAPI) -> int:
 
             if db_emp:
                 emp_id = tutor_info["employee_id"]
-                db_emp.employee_id = int(emp_id) if emp_id else None
+                # Only update employee_id if we have a valid value from tutor API
+                # Don't overwrite existing employee_id with None
+                if emp_id:
+                    db_emp.employee_id = int(emp_id)
                 db_emp.is_tutor = True
                 db_emp.tutor_type = tutor_info["tutor_type"]
                 db_emp.tutor_subtype = tutor_info["tutor_subtype"]
