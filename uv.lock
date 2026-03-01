@@ -478,7 +478,7 @@ wheels = [
 [[package]]
 name = "okc-py"
 version = "1.4.1"
-source = { git = "https://github.com/stp-team/okc-py.git#6acf528a704858013d7429ca6686e2036e2ef92c" }
+source = { git = "https://github.com/stp-team/okc-py.git#3da7af66bf6d561bd3a389f26f9cba287e0e88c2" }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
     { name = "pydantic" },

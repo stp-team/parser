@@ -27,7 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 def get_recent_periods(months: int = 6) -> list[str]:
-    """Get recent months as period strings (including current month)."""
+    """
+    Get recent months as period strings (including current month).
+
+    Args:
+        months: Number of months to fetch (including current month)
+
+    Returns:
+        List of period strings in DD.MM.YYYY format
+
+    Example:
+        If current month is 2026-02 and months=2:
+        Returns ["01.02.2026", "01.01.2026"] (current and previous month)
+    """
     previous_months = PeriodHelper.get_previous_months(months_count=months - 1)
     current_month = datetime_date.today().strftime("%Y-%m")
     all_months = [current_month] + previous_months
@@ -140,20 +152,33 @@ async def fill_premium(
 
     async with get_stats_session() as session:
         model = HeadPremium if is_head else SpecPremium
+
+        # Get unique periods that will be updated
+        unique_periods = {p.extraction_period for p in premium_objects}
+        periods_str = ", ".join(str(p.date()) for p in sorted(unique_periods))
         logger.info(
-            f"[{premium_type} Premium] Deleting old data and inserting new records"
+            f"[{premium_type} Premium] Deleting old data for periods: {periods_str}"
         )
 
-        # Delete rows where employee_id is None and old period data
+        # Delete rows where employee_id is None (data quality cleanup)
         await session.execute(delete(model).where(model.employee_id.is_(None)))
-        unique_periods = {p.extraction_period for p in premium_objects}
+
+        # Delete old data for the periods we're about to update
+        # This ensures we get fresh data for the last 2 months (current + previous)
         for _period in unique_periods:
-            await session.execute(
+            deleted = await session.execute(
                 delete(model).where(model.extraction_period == _period)
             )
+            logger.debug(
+                f"[{premium_type} Premium] Deleted {deleted.rowcount} rows for period {_period.date()}"
+            )
 
+        # Insert fresh data
         session.add_all(premium_objects)
         await session.commit()
+        logger.info(
+            f"[{premium_type} Premium] Successfully saved {len(premium_objects)} records"
+        )
 
     logger.info(
         f"[{premium_type} Premium] Completed: {len(premium_objects)} records saved"
@@ -163,23 +188,49 @@ async def fill_premium(
 
 @log_processing_time("Specialist Premium data processing")
 async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -> int:
-    """Fill specialist premium data."""
+    """
+    Fill specialist premium data for last 2 months (current + previous).
+
+    This ensures we get updates for:
+    - Current month (partial data that may be updated)
+    - Previous month (complete data that may have late updates)
+
+    Args:
+        api: PremiumAPI instance
+        period: Optional specific period (format: DD.MM.YYYY). If None, uses last 2 months.
+
+    Returns:
+        Number of records saved
+    """
     from src.services.constants import unites
 
     periods = [period] if period else get_recent_periods(2)
-    logger.info(f"Starting specialist premium update for periods: {periods}")
+    logger.info(f"[Specialist Premium] Updating periods: {periods}")
     count = await fill_premium(api, unites, periods, is_head=False)
-    logger.info(f"Specialist premium update completed: {count} records")
+    logger.info(f"[Specialist Premium] Update completed: {count} records")
     return count
 
 
 @log_processing_time("Head Premium data processing")
 async def fill_heads_premium(api: PremiumAPI, period: str | None = None) -> int:
-    """Fill head premium data."""
+    """
+    Fill head premium data for last 2 months (current + previous).
+
+    This ensures we get updates for:
+    - Current month (partial data that may be updated)
+    - Previous month (complete data that may have late updates)
+
+    Args:
+        api: PremiumAPI instance
+        period: Optional specific period (format: DD.MM.YYYY). If None, uses last 2 months.
+
+    Returns:
+        Number of records saved
+    """
     periods = [period] if period else get_recent_periods(2)
-    logger.info(f"Starting head premium update for periods: {periods}")
+    logger.info(f"[Head Premium] Updating periods: {periods}")
     count = await fill_premium(api, ["НТП", "НЦК"], periods, is_head=True)
-    logger.info(f"Head premium update completed: {count} records")
+    logger.info(f"[Head Premium] Update completed: {count} records")
     return count
 
 
