@@ -8,7 +8,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
+#from apscheduler.triggers.interval import IntervalTrigger
 from okc_py import OKC
 
 from src.core.config import settings
@@ -133,9 +133,19 @@ class Scheduler:
 
     async def _setup_employees(self) -> None:
         """Настройка задач, связанных с сотрудниками."""
+        if settings.DOSSIER_BULK_SYNC_MODE == "once":
+            dossier_hours = [8]
+        elif settings.DOSSIER_BULK_SYNC_MODE == "twice":
+            dossier_hours = [8, 20]
+        else:
+            dossier_hours = settings.DOSSIER_BULK_SYNC_HOURS
+
+        dossier_hours_expr = ",".join(str(hour) for hour in dossier_hours)
+
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employee_ids, "employees_ids"),
-            trigger=IntervalTrigger(hours=24),
+            #trigger=IntervalTrigger(hours=24),
+            trigger=CronTrigger(hour=dossier_hours_expr, minute=0),
             args=[self.okc_client.api.dossier],
             id="employees_ids",
             name="Заполнение идентификатора OKC",
@@ -144,14 +154,19 @@ class Scheduler:
 
         self.scheduler.add_job(
             self._safe_job_wrapper(fill_employment_dates, "employees_employment_dates"),
-            trigger=IntervalTrigger(hours=24),
+            #trigger=IntervalTrigger(hours=24),
+            trigger=CronTrigger(hour=dossier_hours_expr, minute=20),
             args=[self.okc_client.api.dossier],
             id="employees_employment_dates",
             name="Заполнение дат трудоустройства",
             replace_existing=True,
         )
 
-        self.logger.info("[Планировщик] Задачи сотрудников настроены")
+        #self.logger.info("[Планировщик] Задачи сотрудников настроены")
+        self.logger.info(
+            "[Планировщик] Задачи сотрудников настроены на часы: %s",
+            dossier_hours,
+        )
 
     async def _setup_kpi(self) -> None:
         """Настройка задач, связанных с показателями KPI."""

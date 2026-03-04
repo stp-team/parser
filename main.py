@@ -66,6 +66,12 @@ async def main():
 
         async with scheduler.managed_lifecycle():
             logger.info("Планировщик запущен")
+            logger.info(
+                "Dossier bulk sync config: mode=%s, custom_hours=%s, on_startup=%s",
+                settings.DOSSIER_BULK_SYNC_MODE,
+                settings.DOSSIER_BULK_SYNC_HOURS,
+                settings.DOSSIER_BULK_SYNC_ON_STARTUP,
+            )
 
             status = scheduler.get_job_status()
             logger.info(f"Запланированные задачи: {len(status['jobs'])}")
@@ -75,7 +81,16 @@ async def main():
                 )
 
             logger.info("Запуск получения данных при старте парсера...")
-            await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
+            #await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
+            if settings.DOSSIER_BULK_SYNC_ON_STARTUP:
+                logger.info(
+                    "Догрузка досье при запуске включена: запускаем fill_employees"
+                )
+                await fill_employees(okc_client.api.dossier, okc_client.api.tutors)
+            else:
+                logger.info(
+                    "Догрузка досье при запуске отключена: пропускаем fill_employees"
+                )
             await fill_kpi(okc_client.api.ure)
             await fill_heads_premium(okc_client.api.premium)
             await fill_specialists_premium(okc_client.api.premium)
