@@ -146,6 +146,24 @@ async def fill_premium(
         logger.warning(f"[{premium_type} Premium] No premium data retrieved from API")
         return 0
 
+    # API can return the same employee for the same period from different divisions.
+    # Keep only one record per DB primary key to avoid IntegrityError on bulk insert.
+    unique_premium_objects: dict[tuple[int, datetime], SpecPremium | HeadPremium] = {}
+    duplicates_count = 0
+    for premium in premium_objects:
+        key = (premium.employee_id, premium.extraction_period)
+        if key in unique_premium_objects:
+            duplicates_count += 1
+        unique_premium_objects[key] = premium
+
+    if duplicates_count:
+        logger.warning(
+            f"[{premium_type} Premium] Found {duplicates_count} duplicate records "
+            "by (employee_id, extraction_period); keeping the last occurrence"
+        )
+
+    premium_objects = list(unique_premium_objects.values())
+
     logger.info(
         f"[{premium_type} Premium] Mapped {len(premium_objects)} premium records"
     )
