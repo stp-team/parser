@@ -26,29 +26,47 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def get_recent_periods(months: int = 6) -> list[str]:
+def get_recent_periods(
+    months: int = 6,
+) -> list[str]:
     """
-    Get recent months as period strings (including current month).
+    Get recent months as period strings
+    (including current month).
 
-    Args:
-        months: Number of months to fetch (including current month)
-
-    Returns:
-        List of period strings in DD.MM.YYYY format
+    Format:
+        MM.YYYY
 
     Example:
-        If current month is 2026-02 and months=2:
-        Returns ["01.02.2026", "01.01.2026"] (current and previous month)
+        If current month is 2026-08 and months=2:
+        ["08.2026", "07.2026"]
     """
-    previous_months = PeriodHelper.get_previous_months(months_count=months - 1)
-    current_month = datetime_date.today().strftime("%Y-%m")
-    all_months = [current_month] + previous_months
+
+    previous_months = PeriodHelper.get_previous_months(
+        months_count=months - 1
+    )
+
+    current_month = datetime_date.today().strftime(
+        "%Y-%m"
+    )
+
+    all_months = [
+        current_month,
+        *previous_months,
+    ]
 
     periods = []
+
     for month_str in all_months:
-        start_date, _ = PeriodHelper.parse_period_string(month_str)
-        period = PeriodHelper.format_date_for_api(start_date, "DD.MM.YYYY")
+        start_date, _ = PeriodHelper.parse_period_string(
+            month_str
+        )
+
+        period = start_date.strftime(
+            "%m.%Y"
+        )
+
         periods.append(period)
+
     return periods
 
 
@@ -215,7 +233,7 @@ async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -
 
     Args:
         api: PremiumAPI instance
-        period: Optional specific period (format: DD.MM.YYYY). If None, uses last 2 months.
+        period: Optional specific period (format: MM.YYYY). If None, uses last 2 months.
 
     Returns:
         Number of records saved
@@ -240,7 +258,7 @@ async def fill_heads_premium(api: PremiumAPI, period: str | None = None) -> int:
 
     Args:
         api: PremiumAPI instance
-        period: Optional specific period (format: DD.MM.YYYY). If None, uses last 2 months.
+        period: Optional specific period (format: MM.YYYY). If None, uses last 2 months.
 
     Returns:
         Number of records saved
