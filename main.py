@@ -127,15 +127,15 @@ async def run_startup_tasks(
         source="startup",
     )
 
-    await run_tracked_task(
-        "tutors",
-        fill_tutor_schedule,
-        okc_client.api.tutors,
-        task_title=(
-            "Обновление расписания наставников"
-        ),
-        source="startup",
-    )
+    # await run_tracked_task(
+    #     "tutors",
+    #     fill_tutor_schedule,
+    #     okc_client.api.tutors,
+    #     task_title=(
+    #         "Обновление расписания наставников"
+    #     ),
+    #     source="startup",
+    # )
 
     await run_tracked_task(
         "sl",
@@ -147,15 +147,15 @@ async def run_startup_tasks(
         source="startup",
     )
 
-    await run_tracked_task(
-        "tests_current",
-        fill_assigned_tests,
-        okc_client.api.tests,
-        task_title=(
-            "Обновление назначенных тестов"
-        ),
-        source="startup",
-    )
+    # await run_tracked_task(
+    #     "tests_current",
+    #     fill_assigned_tests,
+    #     okc_client.api.tests,
+    #     task_title=(
+    #         "Обновление назначенных тестов"
+    #     ),
+    #     source="startup",
+    # )
 
     logger.info(
         "Получение данных "

@@ -182,8 +182,8 @@ class Scheduler:
         await self._setup_employees()
         await self._setup_kpi()
         await self._setup_premium()
-        await self._setup_tutors()
-        await self._setup_tests()
+        # await self._setup_tutors()
+        # await self._setup_tests()
 
     async def _setup_employees(
         self,

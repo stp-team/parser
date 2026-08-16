@@ -431,11 +431,25 @@ async def fill_employee_ids(dossier_api: DossierAPI) -> int:
 
 
 @log_processing_time("All employee data processing")
-async def fill_employees(dossier_api: DossierAPI, tutors_api: TutorsAPI) -> None:
+async def fill_employees(
+    dossier_api: DossierAPI,
+    tutors_api: TutorsAPI,
+) -> None:
     """Main function to fill all employee-related data."""
+
     logger.info(
-        "[Employees] Starting comprehensive employee data update (all data + tutor info)"
+        "[Employees] Starting comprehensive employee data update"
     )
-    await update_all_employee_data(dossier_api)
-    await update_tutor_info(tutors_api)
-    logger.info("[Employees] Comprehensive employee data update completed")
+
+    await update_all_employee_data(
+        dossier_api
+    )
+
+    # Временно отключено получение данных наставников
+    # await update_tutor_info(
+    #     tutors_api
+    # )
+
+    logger.info(
+        "[Employees] Comprehensive employee data update completed"
+    )
