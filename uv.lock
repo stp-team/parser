@@ -399,7 +399,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
     { name = "rich", specifier = ">=13.9.0" },
-    { name = "stp-database", git = "https://github.com/STP-Team/stp-database?branch=achievements-beta" },
+    { name = "stp-database", git = "https://github.com/STP-Team/stp-database?branch=main" },
     { name = "stp-redis", git = "https://github.com/stp-team/stp_redis.git" },
 ]
 
@@ -643,7 +643,7 @@ wheels = [
 [[package]]
 name = "stp-database"
 version = "2.0"
-source = { git = "https://github.com/STP-Team/stp-database?branch=achievements-beta#647d4cf9a6945fe70f9b68318142201051848329" }
+source = { git = "https://github.com/STP-Team/stp-database?branch=main#358036c9b85d5750109a3970b5681b22a0d8e169" }
 dependencies = [
     { name = "aiomysql" },
     { name = "pytz" },

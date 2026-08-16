@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-stp-database = { git = "https://github.com/STP-Team/stp-database", branch = "achievements-beta" }
+stp-database = { git = "https://github.com/STP-Team/stp-database", branch = "main" }
 okc-py = { git = "https://github.com/stp-team/okc-py.git" }
 stp-redis = { git = "https://github.com/stp-team/stp_redis.git" }
 
