@@ -234,7 +234,13 @@ async def fetch_kpi_reports(
                 )
             return result
         except Exception as e:
-            logger.error(f"Error fetching {division}/{report_type}: {e}")
+            logger.exception(
+                "Error fetching %s/%s: %s",
+                division,
+                report_type,
+                e,
+            )
+
             return None
 
     tasks = [
@@ -279,8 +285,16 @@ async def fetch_thanks_reports(
                 logger.info(f"Division {division}: fetched {len(data)} thanks records")
             return (division, data)
         except Exception as e:
-            logger.error(f"Error fetching thanks for division {division}: {e}")
-            return (division, [])
+            logger.exception(
+                "Error fetching thanks for division %s: %s",
+                division,
+                e,
+            )
+
+            return (
+                division,
+                [],
+            )
 
     fetcher = ConcurrentAPIFetcher(semaphore_limit=10)
     results = await fetcher.fetch_parallel(

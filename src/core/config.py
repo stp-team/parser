@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ''
     REDIS_PARSER_STREAM: str = 'parser'
 
+    # Лог выполнения задач
+    REDIS_PARSER_LOG_LEVEL: str = "INFO"
+    REDIS_PARSER_LOG_MAX_RECORDS: int = 300
+    REDIS_PARSER_LOG_MAX_MESSAGE_LENGTH: int = 4000
+
     # Настройки БД
     DB_HOST: str
     DB_PORT: int

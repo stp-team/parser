@@ -80,8 +80,23 @@ class ConcurrentAPIFetcher:
         processed_results = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                self.logger.error(f"Task {i} failed: {result}")
-                processed_results.append((tasks[i], None))
+                self.logger.error(
+                    "Task %s failed: %s",
+                    i,
+                    result,
+                    exc_info=(
+                        type(result),
+                        result,
+                        result.__traceback__,
+                    ),
+                )
+
+                processed_results.append(
+                    (
+                        tasks[i],
+                        None,
+                    )
+                )
             else:
                 processed_results.append((tasks[i], result))
 
@@ -133,7 +148,7 @@ class BatchDBOperator:
             return len(data_list)
 
         except Exception as e:
-            self.logger.error(f"[{operation_name}] Bulk insert failed: {e}")
+            self.logger.error(f"[{operation_name}] Bulk insert failed: {e}", operation_name, e)
             await self.session.rollback()
             return 0
 
@@ -172,7 +187,7 @@ class BatchDBOperator:
             return updated_count
 
         except Exception as e:
-            self.logger.error(f"[{operation_name}] Bulk update failed: {e}")
+            self.logger.error(f"[{operation_name}] Bulk update failed: {e}", operation_name, e)
             await self.session.rollback()
             return 0
 
