@@ -120,6 +120,11 @@ def map_premium_row(
         premium.aht_normative_rate = row.aht_normative_rate
         premium.aht_premium = row.aht_premium
 
+        # Revenue fields for specialists
+        premium.revenue = row.revenue
+        premium.revenue_normative = row.revenue_normative
+        premium.revenue_normative_rate = row.revenue_normative_rate
+
     return premium
 
 
