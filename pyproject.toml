@@ -11,12 +11,14 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "stp-database",
+    "stp-redis",
     "rich>=13.9.0",
 ]
 
 [tool.uv.sources]
 stp-database = { git = "https://github.com/STP-Team/stp-database", branch = "achievements-beta" }
 okc-py = { git = "https://github.com/stp-team/okc-py.git" }
+stp-redis = { git = "https://github.com/stp-team/stp_redis.git" }
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

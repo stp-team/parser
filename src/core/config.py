@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     OKC_PASSWORD: str
     OKC_BASE_URL: str
 
+    # REDIS
+    REDIS_HOST: str = '127.0.0.1'
+    REDIS_PORT: int = 9080
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: str = ''
+    REDIS_PARSER_STREAM: str = 'parser'
+
     # Настройки БД
     DB_HOST: str
     DB_PORT: int
