@@ -137,16 +137,97 @@ def aggregate_kpi_data(
     extraction_period: datetime,
     thanks_results: list[tuple[int, Any]] = None,
 ) -> list:
-    """Aggregate KPI data by employee_id."""
+    """Aggregate KPI data by employee_id.
+
+    Для FLR НТП2 и НЦК ОКС не возвращает ID сотрудника.
+    В таком случае employee_id определяется по связке:
+    (направление, ФИО)
+
+    Соответствие ФИО > employee_id собирается из других
+    KPI-отчётов того же направления, где ID присутствует.
+    """
+
     kpi_by_employee_id = {}
 
-    # Process standard KPI reports
-    for (_, report_type), api_result in api_results:
+    # (division, normalized_fullname) > employee_id
+    employee_id_by_fullname: dict[tuple[str, str], int] = {}
+
+    # Если в одном направлении одно ФИО вдруг соответствует
+    # разным employee_id - не используем такое соответствие.
+    ambiguous_fullnames: set[tuple[str, str]] = set()
+
+    flr_fallback_resolved = 0
+    flr_fallback_unresolved = 0
+
+    def normalize_fullname(fullname: Any) -> str | None:
+        """Normalize fullname for safe matching between reports."""
+        if not isinstance(fullname, str):
+            return None
+
+        normalized = " ".join(fullname.split()).casefold()
+
+        return normalized or None
+
+    # Первый проход:
+    # собираем (division, FIO) -> employee_id из всех отчётов.
+    # в которых ОКС реально прислал ID.
+    for (division, _), api_result in api_results:
+        if not api_result or not hasattr(api_result, "data"):
+            continue
+
+        for item in api_result.data:
+            employee_id = parse_employee_id(
+                getattr(item, "id", None)
+            )
+
+            fullname = normalize_fullname(
+                getattr(item, "fullname", None)
+            )
+
+            if employee_id is None or fullname is None:
+                continue
+
+            key = (division, fullname)
+
+            if key in ambiguous_fullnames:
+                continue
+
+            existing_employee_id = employee_id_by_fullname.get(key)
+
+            if existing_employee_id is None:
+                employee_id_by_fullname[key] = employee_id
+                continue
+
+            if existing_employee_id != employee_id:
+                employee_id_by_fullname.pop(key, None)
+                ambiguous_fullnames.add(key)
+
+                logger.warning(
+                    "Ambiguous employee mapping: "
+                    "division=%s, fullname=%r, "
+                    "employee_id=%s/%s",
+                    division,
+                    getattr(item, "fullname", None),
+                    existing_employee_id,
+                    employee_id,
+                )
+
+    logger.info(
+        "Built employee mapping by division/FIO: "
+        "%s mappings, %s ambiguous",
+        len(employee_id_by_fullname),
+        len(ambiguous_fullnames),
+    )
+
+    # Второй проход:
+    # обычная агрегация KPI.
+    for (division, report_type), api_result in api_results:
         if not api_result or not hasattr(api_result, "data"):
             continue
 
         record_class = REPORT_TYPES.get(report_type)
         mapper = FIELD_MAPPERS.get(report_type)
+
         if not record_class or not mapper:
             continue
 
@@ -160,7 +241,40 @@ def aggregate_kpi_data(
             except Exception:
                 continue
 
+            # Сначала пробуем обычный ID из OKC.
             employee_id = parse_employee_id(record.id)
+
+            #
+            # FLR fallback.
+            #
+            # У НТП2 и НЦК FLR report не содержит ID,
+            # поэтому ищем employe_id по:
+            #
+            # division = FIO
+            #
+            if employee_id is None and report_type == "FLR":
+                fullname = normalize_fullname(
+                    getattr(record, "fullname", None)
+                )
+
+                if fullname is not None:
+                    key = (division, fullname)
+
+                    if key not in ambiguous_fullnames:
+                        employee_id = employee_id_by_fullname.get(key)
+
+                if employee_id is not None:
+                    flr_fallback_resolved += 1
+                else:
+                    flr_fallback_unresolved += 1
+
+                    logger.warning(
+                        "Unable to resolve employee_id for FLR: "
+                        "division=%s, fullname=%r",
+                        division,
+                        getattr(record, "fullname", None),
+                    )
+
             if employee_id is None:
                 continue
 
@@ -168,23 +282,40 @@ def aggregate_kpi_data(
                 kpi_obj = model_class()
                 kpi_obj.employee_id = employee_id
                 kpi_obj.extraction_period = extraction_period
+
                 kpi_by_employee_id[employee_id] = kpi_obj
 
-            mapper(kpi_by_employee_id[employee_id], record)
+            mapper(
+                kpi_by_employee_id[employee_id],
+                record,
+            )
 
-    # Process thanks data
+    logger.info(
+        "FLR employee_id fallback: "
+        "resolved=%s, unresolved=%s",
+        flr_fallback_resolved,
+        flr_fallback_unresolved,
+    )
+
+    # Thanks
     if thanks_results:
         for _, thanks_result in thanks_results:
             if not thanks_result:
                 continue
 
-            items = thanks_result if isinstance(thanks_result, list) else []
+            items = (
+                thanks_result
+                if isinstance(thanks_result, list)
+                else []
+            )
 
             for item in items:
                 if isinstance(item, dict):
                     employee_id = item.get("whomId")
+
                 elif isinstance(item, ThanksReportItem):
                     employee_id = item.whom_id
+
                 else:
                     continue
 
@@ -195,14 +326,27 @@ def aggregate_kpi_data(
                     kpi_obj = model_class()
                     kpi_obj.employee_id = employee_id
                     kpi_obj.extraction_period = extraction_period
+
                     kpi_by_employee_id[employee_id] = kpi_obj
 
                 current_thanks = (
-                    getattr(kpi_by_employee_id[employee_id], "thanks", 0) or 0
+                    getattr(
+                        kpi_by_employee_id[employee_id],
+                        "thanks",
+                        0,
+                    )
+                    or 0
                 )
-                kpi_by_employee_id[employee_id].thanks = current_thanks + 1
 
-    return [kpi for kpi in kpi_by_employee_id.values() if kpi.employee_id]
+                kpi_by_employee_id[employee_id].thanks = (
+                    current_thanks + 1
+                )
+
+    return [
+        kpi
+        for kpi in kpi_by_employee_id.values()
+        if kpi.employee_id
+    ]
 
 
 async def fetch_kpi_reports(
