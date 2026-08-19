@@ -1,315 +1,460 @@
-"""WebSocket to NATS bridge for OKC lines data."""
+"""OKC Line WebSocket -> Redis notifications bridge."""
 
 import asyncio
-import json
+import html
 import logging
+import re
 from typing import Any
 
 from okc_py import OKC
-from okc_py.sockets.models import RawData, RawIncidents
+from stp_redis import (
+    NotificationEvent,
+    NotificationRecipients,
+    NotificationServiceInfo,
+    RedisNotificationService,
+)
 
-from src.core.config import settings
-from src.core.nats_client import nats_client
 
 logger = logging.getLogger(__name__)
 
 
+# Уведомления OKC отправляются ТОЛЬКО этим пользователям.
+OKC_NOTIFICATION_RECIPIENT_IDS = [
+    7920,
+    7585,
+]
+
+
 class WebSocketBridge:
-    """Bridge for OKC WebSocket lines to NATS messaging."""
+    """
+    Слушает WebSocket конкретной линии OKC.
 
-    def __init__(self, okc_client: OKC, line_name: str = "nck"):
-        """
-        Initialize WebSocket bridge.
+    Используем только событие:
+        message
 
-        Args:
-            okc_client: OKC client instance
-            line_name: Line to connect to (nck, ntp1, ntp2)
-        """
+    Полученное сообщение отправляется
+    в стандартный Redis notification stream.
+    """
+
+    def __init__(
+        self,
+        okc_client: OKC,
+        line_name: str,
+    ) -> None:
         self.okc_client = okc_client
         self.line_name = line_name
+
         self.line = None
+
         self.is_running = False
+
         self._reconnect_delay = 5
-        self._max_reconnect_attempts = 10
+
+        # Тот же RedisNotificationService,
+        # который используется API.
+        #
+        # stream_name специально НЕ указываем:
+        # будет использован стандартный
+        # REDIS_NOTIFICATION_STREAM.
+        self.notificator = RedisNotificationService()
 
     async def start(self) -> None:
-        """Start the WebSocket bridge connection."""
-        if not settings.NATS_HOST:
-            logger.warning("NATS_HOST is not configured, skipping WebSocket bridge")
-            return
+        """Запустить WebSocket линии и поддерживать соединение."""
 
-        if not nats_client.nc:
-            logger.warning("NATS client is not connected, skipping WebSocket bridge")
-            return
+        logger.info(
+            "[%s] Starting OKC WebSocket bridge",
+            self.line_name,
+        )
 
-        logger.info(f"Starting WebSocket bridge for line: {self.line_name}")
-
-        # Get the line object from okc_client
         try:
-            self.line = getattr(self.okc_client.ws.lines, self.line_name)
-            logger.info(f"Got line object for {self.line_name}, calling connect...")
+            self.line = getattr(
+                self.okc_client.ws.lines,
+                self.line_name,
+            )
+
         except AttributeError:
             logger.error(
-                f"Invalid line name: {self.line_name}. Available: nck, ntp1, ntp2"
+                "[%s] Unknown OKC line",
+                self.line_name,
             )
             raise
 
-        # Set running flag BEFORE attempting connection
+        # Обработчик регистрируем ДО connect().
+        #
+        # OKC может прислать message сразу
+        # после установки соединения.
+        self.line.on(
+            "message",
+            self._on_message,
+        )
+
         self.is_running = True
 
-        # NOTE: Following okc-py official example pattern:
-        # https://github.com/STP-Team/okc-py/blob/main/examples/sockets/lines.py
-        # Handlers are registered AFTER connection to avoid missing initial events
-        await self._connect_with_retry()
-
-    async def _connect_with_retry(self) -> None:
-        """Connect to WebSocket with retry logic."""
-        reconnect_attempt = 0
-
-        while reconnect_attempt < self._max_reconnect_attempts and self.is_running:
-            try:
-                await self.line.connect()
-                logger.info(f"WebSocket connected to line: {self.line_name}")
-
-                # Register event handlers AFTER connection (following okc-py pattern)
-                # This ensures we catch all events including initial ones
-                self.line.on("rawData", self._on_raw_data)
-                self.line.on("rawIncidents", self._on_raw_incidents)
-                logger.debug(f"Registered event handlers for {self.line_name}")
-
-                self.is_running = True
-                reconnect_attempt = 0  # Reset counter on successful connection
-
-                # Start monitoring connection
-                await self._monitor_connection()
-
-            except asyncio.CancelledError:
-                # Shutdown requested - clean up and re-raise
-                logger.info("WebSocket bridge shutdown requested")
-                self.is_running = False
-                if self.line and self.line.is_connected:
-                    await self.line.disconnect()
-                    logger.info(f"WebSocket disconnected from line: {self.line_name}")
-                raise  # Re-raise to properly cancel the task
-            except Exception as e:
-                reconnect_attempt += 1
-                logger.error(
-                    f"[{self.line_name}] WebSocket connection error (attempt {reconnect_attempt}/{self._max_reconnect_attempts}): {e}"
-                )
-
-                if reconnect_attempt >= self._max_reconnect_attempts:
-                    logger.error(
-                        f"[{self.line_name}] Max reconnection attempts reached. Stopping WebSocket bridge."
-                    )
-                    self.is_running = False
-                    break
-
-                # Only reconnect if we're still supposed to be running
-                if self.is_running:
-                    logger.info(
-                        f"[{self.line_name}] Reconnecting in {self._reconnect_delay} seconds..."
-                    )
-                    await asyncio.sleep(self._reconnect_delay)
-
-    async def _monitor_connection(self) -> None:
-        """Monitor WebSocket connection and handle disconnections."""
         while self.is_running:
             try:
-                await asyncio.sleep(5)
+                logger.info(
+                    "[%s] Connecting to OKC WebSocket...",
+                    self.line_name,
+                )
 
-                if not self.line.is_connected:
-                    logger.warning(
-                        f"[{self.line_name}] WebSocket connection lost, attempting to reconnect..."
-                    )
-                    self.is_running = False
+                await self.line.connect()
+
+                logger.info(
+                    "[%s] OKC WebSocket connected",
+                    self.line_name,
+                )
+
+                while (
+                    self.is_running
+                    and self.line.is_connected
+                ):
+                    await asyncio.sleep(5)
+
+                if not self.is_running:
                     break
 
+                logger.warning(
+                    "[%s] OKC WebSocket disconnected",
+                    self.line_name,
+                )
+
             except asyncio.CancelledError:
-                logger.info("WebSocket monitor cancelled")
-                self.is_running = False
-                break
+                logger.info(
+                    "[%s] WebSocket bridge cancelled",
+                    self.line_name,
+                )
+                raise
+
             except Exception as e:
                 logger.error(
-                    f"[{self.line_name}] Error monitoring WebSocket connection: {e}"
+                    "[%s] WebSocket error: %s",
+                    self.line_name,
+                    e,
+                    exc_info=True,
                 )
-                self.is_running = False
-                break
 
-    async def _on_raw_data(self, data: dict) -> None:
-        """Handle rawData events from WebSocket."""
-        try:
-            # Validate data using Pydantic model
-            raw_data = RawData(**data)
+            try:
+                if self.line:
+                    await self.line.disconnect()
 
-            # Prepare message for NATS
-            message = {
-                "type": "rawData",
-                "line": self.line_name,
-                "timestamp": asyncio.get_event_loop().time(),
-                "data": self._serialize_raw_data(raw_data),
-            }
+            except Exception:
+                pass
 
-            # Publish to NATS with line-specific subject
-            await self._publish_to_nats(message, f"ws_line_{self.line_name}")
-
-            logger.debug(f"Published rawData event from {self.line_name}")
-
-        except Exception as e:
-            logger.error(f"Error processing rawData event: {e}")
-
-    async def _on_raw_incidents(self, data: dict) -> None:
-        """Handle rawIncidents events from WebSocket."""
-        try:
-            # Validate data using Pydantic model
-            incidents = RawIncidents(**data)
-
-            # Prepare message for NATS
-            message = {
-                "type": "rawIncidents",
-                "line": self.line_name,
-                "timestamp": asyncio.get_event_loop().time(),
-                "data": self._serialize_raw_incidents(incidents),
-            }
-
-            # Publish to NATS with line-specific subject
-            await self._publish_to_nats(message, f"ws_line_{self.line_name}")
-
-            logger.debug(f"Published rawIncidents event from {self.line_name}")
-
-        except Exception as e:
-            logger.error(f"Error processing rawIncidents event: {e}")
-
-    async def _publish_to_nats(self, message: dict[str, Any], subject: str) -> None:
-        """Publish message to NATS with specified subject."""
-        try:
-            if nats_client.nc:
-                await nats_client.nc.publish(
-                    subject,
-                    json.dumps(message, ensure_ascii=False, default=str).encode(
-                        "utf-8"
-                    ),
+            if self.is_running:
+                logger.info(
+                    "[%s] Reconnecting in %s seconds...",
+                    self.line_name,
+                    self._reconnect_delay,
                 )
-            else:
-                logger.warning("NATS client not connected, cannot publish message")
+
+                await asyncio.sleep(
+                    self._reconnect_delay
+                )
+
+    @staticmethod
+    def _html_to_text(
+        value: str,
+    ) -> str:
+        """
+        OKC присылает messageText в HTML.
+
+        Например:
+            <p>Делей, оперативнее</p>
+
+        В notification.body отправляем обычный текст.
+        """
+
+        if not value:
+            return ""
+
+        value = re.sub(
+            r"<br\s*/?>",
+            "\n",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        value = re.sub(
+            r"</p\s*>",
+            "\n",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        value = re.sub(
+            r"<[^>]+>",
+            "",
+            value,
+        )
+
+        value = html.unescape(
+            value
+        )
+
+        lines = [
+            line.strip()
+            for line in value.splitlines()
+            if line.strip()
+        ]
+
+        return "\n".join(lines)
+
+    async def _on_message(
+        self,
+        data: Any,
+    ) -> None:
+        """
+        Обработать событие OKC:
+
+        ["message", {
+            "messageText": "<p>...</p>",
+            "authorName": "...",
+            "from": "line-ntp2"
+        }]
+        """
+
+        if not isinstance(data, dict):
+            logger.warning(
+                "[%s] Invalid OKC message: %r",
+                self.line_name,
+                data,
+            )
+            return
+
+        message_html = str(
+            data.get("messageText")
+            or ""
+        )
+
+        message_text = self._html_to_text(
+            message_html
+        )
+
+        author_name = str(
+            data.get("authorName")
+            or "ОКС"
+        ).strip()
+
+        source = str(
+            data.get("from")
+            or self.line_name
+        ).strip()
+
+        if not message_text:
+            logger.warning(
+                "[%s] Empty OKC message received",
+                self.line_name,
+            )
+            return
+
+        event = NotificationEvent(
+            event_type="okc.line.message",
+
+            event_service=NotificationServiceInfo(
+                title="okc_service",
+            ),
+
+            channels_type=[
+                "ws",
+                "fcm",
+            ],
+
+            title=f"ОКС • {author_name}",
+
+            body=message_text,
+
+            payload={
+                "line": self.line_name,
+                "from": source,
+                "authorName": author_name,
+            },
+
+            recipients=NotificationRecipients(
+                include_ids=(
+                    OKC_NOTIFICATION_RECIPIENT_IDS
+                ),
+            ),
+        )
+
+        try:
+            notification_id = (
+                await self.notificator.publish_notification(
+                    event
+                )
+            )
+
+            logger.info(
+                "[%s] OKC message published: "
+                "notification_id=%s "
+                "recipients=%s "
+                "author=%r",
+                self.line_name,
+                notification_id,
+                OKC_NOTIFICATION_RECIPIENT_IDS,
+                author_name,
+            )
 
         except Exception as e:
-            logger.error(f"[{self.line_name}] Error publishing to NATS: {e}")
-
-    def _serialize_raw_data(self, raw_data: RawData) -> dict[str, Any]:
-        """Serialize RawData object to dictionary using Pydantic model_dump."""
-        return raw_data.model_dump(mode="json", exclude_none=True)
-
-    def _serialize_raw_incidents(self, incidents: RawIncidents) -> dict[str, Any]:
-        """Serialize RawIncidents object to dictionary using Pydantic model_dump."""
-        return incidents.model_dump(mode="json", exclude_none=True)
+            # Redis/notificator не должен ронять
+            # WebSocket OKC.
+            logger.error(
+                "[%s] Failed to publish "
+                "OKC notification: %s",
+                self.line_name,
+                e,
+                exc_info=True,
+            )
 
     async def stop(self) -> None:
-        """Stop the WebSocket bridge."""
-        logger.info("Stopping WebSocket bridge...")
+        """Остановить WebSocket bridge."""
+
         self.is_running = False
 
-        # Ensure WebSocket is disconnected if still connected
-        if self.line and self.line.is_connected:
-            await self.line.disconnect()
-            logger.info(f"WebSocket disconnected from line: {self.line_name}")
+        if self.line:
+            try:
+                await self.line.disconnect()
+
+            except Exception as e:
+                logger.warning(
+                    "[%s] Error disconnecting "
+                    "OKC WebSocket: %s",
+                    self.line_name,
+                    e,
+                )
+
+        logger.info(
+            "[%s] OKC WebSocket bridge stopped",
+            self.line_name,
+        )
 
 
 class WebSocketBridgeManager:
-    """Manager for multiple WebSocket bridge connections."""
+    """Менеджер WebSocket подключений OKC."""
 
-    def __init__(self, okc_client: OKC, lines: list[str] | None = None):
-        """
-        Initialize WebSocket bridge manager.
-
-        Args:
-            okc_client: OKC client instance
-            lines: List of line names to connect to (default: ["nck"])
-        """
+    def __init__(
+        self,
+        okc_client: OKC,
+        lines: list[str] | None = None,
+    ) -> None:
         self.okc_client = okc_client
-        self.lines = lines or ["nck"]
-        self.bridges: list[WebSocketBridge] = []
-        self.tasks: list[asyncio.Task] = []
+
+        # Только НТП1 и НТП2.
+        self.lines = lines or [
+            "ntp1",
+            "ntp2",
+        ]
+
+        self.bridges: list[
+            WebSocketBridge
+        ] = []
+
+        self.tasks: list[
+            asyncio.Task
+        ] = []
 
     async def start_all(self) -> None:
-        """Start all WebSocket bridges."""
-        logger.info(f"Starting {len(self.lines)} WebSocket bridge(s)...")
+        """Запустить все line WebSocket."""
+
+        logger.info(
+            "Starting OKC WebSocket bridges: %s",
+            ", ".join(self.lines),
+        )
 
         for line_name in self.lines:
-            bridge = WebSocketBridge(self.okc_client, line_name)
-            self.bridges.append(bridge)
+            bridge = WebSocketBridge(
+                okc_client=self.okc_client,
+                line_name=line_name,
+            )
 
-            # Create task for each bridge
-            task = asyncio.create_task(bridge.start())
-            self.tasks.append(task)
+            self.bridges.append(
+                bridge
+            )
 
-        # Give tasks time to establish connections
-        await asyncio.sleep(2)
+            task = asyncio.create_task(
+                bridge.start(),
+                name=f"okc-ws-{line_name}",
+            )
 
-        logger.info(f"All {len(self.lines)} WebSocket bridge(s) started")
+            self.tasks.append(
+                task
+            )
+
+        logger.info(
+            "OKC WebSocket bridge tasks started"
+        )
 
     async def stop_all(self) -> None:
-        """Stop all WebSocket bridges."""
-        logger.info("Stopping all WebSocket bridges...")
+        """Остановить все line WebSocket."""
 
-        # Cancel all tasks
+        logger.info(
+            "Stopping OKC WebSocket bridges..."
+        )
+
+        for bridge in self.bridges:
+            try:
+                await bridge.stop()
+
+            except Exception as e:
+                logger.warning(
+                    "Failed to stop bridge %s: %s",
+                    bridge.line_name,
+                    e,
+                )
+
         for task in self.tasks:
             if not task.done():
                 task.cancel()
 
-        # Wait for tasks to complete
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.tasks:
+            await asyncio.gather(
+                *self.tasks,
+                return_exceptions=True,
+            )
 
-        # Stop all bridges
-        for bridge in self.bridges:
-            await bridge.stop()
-
-        self.bridges.clear()
         self.tasks.clear()
+        self.bridges.clear()
 
-        logger.info("All WebSocket bridges stopped")
-
-    def is_running(self) -> bool:
-        """Check if any bridge is running."""
-        return any(bridge.is_running for bridge in self.bridges)
+        logger.info(
+            "All OKC WebSocket bridges stopped"
+        )
 
 
-# Global WebSocket bridge manager instance
-ws_bridge_manager: WebSocketBridgeManager | None = None
+ws_bridge_manager: (
+    WebSocketBridgeManager | None
+) = None
 
 
 async def setup_ws_bridges(
-    okc_client: OKC, lines: list[str] | None = None
-) -> WebSocketBridgeManager | None:
-    """
-    Setup and start WebSocket bridge manager.
+    okc_client: OKC,
+    lines: list[str] | None = None,
+) -> WebSocketBridgeManager:
+    """Запустить OKC WebSocket bridges."""
 
-    Args:
-        okc_client: OKC client instance
-        lines: List of line names to connect to (default: ["nck"])
-
-    Returns:
-        WebSocketBridgeManager instance
-    """
     global ws_bridge_manager
 
-    if not settings.NATS_HOST:
-        logger.warning("NATS_HOST is not configured, skipping WebSocket bridges setup")
-        return None
+    if ws_bridge_manager is not None:
+        return ws_bridge_manager
 
-    if not nats_client.nc:
-        logger.warning("NATS client is not connected, skipping WebSocket bridges setup")
-        return None
+    ws_bridge_manager = (
+        WebSocketBridgeManager(
+            okc_client=okc_client,
+            lines=lines,
+        )
+    )
 
-    ws_bridge_manager = WebSocketBridgeManager(okc_client, lines)
     await ws_bridge_manager.start_all()
 
     return ws_bridge_manager
 
 
 async def cleanup_ws_bridges() -> None:
-    """Cleanup WebSocket bridges."""
+    """Остановить OKC WebSocket bridges."""
+
     global ws_bridge_manager
 
-    if ws_bridge_manager:
-        await ws_bridge_manager.stop_all()
-        ws_bridge_manager = None
+    if ws_bridge_manager is None:
+        return
+
+    await ws_bridge_manager.stop_all()
+
+    ws_bridge_manager = None

@@ -6,8 +6,10 @@ from okc_py.config import Settings
 from src.core.redis import close_redis
 
 from src.core.config import settings
-from src.core.nats_client import nats_client
-from src.core.ws_bridge import cleanup_ws_bridges
+from src.core.ws_bridge import (
+    cleanup_ws_bridges,
+    setup_ws_bridges,
+)
 from src.services.logger import setup_logging
 from src.services.parser_events import (
     parser_event_service,
@@ -217,6 +219,14 @@ async def main():
 
         parser_started = True
 
+        await setup_ws_bridges(
+            okc_client,
+            lines=[
+                "ntp1",
+                "ntp2",
+            ],
+        )
+
         db_url = (
             settings.SCHEDULER_JOB_STORE_URL
             if (
@@ -354,15 +364,6 @@ async def main():
             logger.warning(
                 "Ошибка при закрытии "
                 f"WebSocket bridges: {e}"
-            )
-
-        try:
-            await nats_client.disconnect()
-
-        except Exception as e:
-            logger.warning(
-                "Ошибка при закрытии "
-                f"NATS соединения: {e}"
             )
 
         if parser_started:
