@@ -11,8 +11,10 @@ from stp_redis import (
     NotificationEvent,
     NotificationRecipients,
     NotificationServiceInfo,
-    RedisNotificationService,
 )
+
+from src.core.config import settings
+from src.core.redis import get_redis
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,6 @@ class WebSocketBridge:
         # stream_name специально НЕ указываем:
         # будет использован стандартный
         # REDIS_NOTIFICATION_STREAM.
-        self.notificator = RedisNotificationService()
 
     async def start(self) -> None:
         """Запустить WebSocket линии и поддерживать соединение."""
@@ -259,7 +260,7 @@ class WebSocketBridge:
                 "fcm",
             ],
 
-            title=f"ОКС • {author_name}",
+            title=f"{self.line_name} • {author_name}",
 
             body=message_text,
 
@@ -277,10 +278,15 @@ class WebSocketBridge:
         )
 
         try:
-            notification_id = (
-                await self.notificator.publish_notification(
-                    event
-                )
+            redis = await get_redis()
+
+            notification_id = await redis.xadd(
+                name=settings.REDIS_NOTIFICATION_STREAM,
+                fields={
+                    "data": event.model_dump_json(),
+                },
+                maxlen=1000,
+                approximate=True,
             )
 
             logger.info(

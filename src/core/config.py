@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_PASSWORD: str = ''
     REDIS_PARSER_STREAM: str = 'parser'
+    REDIS_NOTIFICATION_STREAM: str = 'notifications'
 
     # Лог выполнения задач
     REDIS_PARSER_LOG_LEVEL: str = "INFO"
