@@ -26,6 +26,10 @@ OKC_NOTIFICATION_RECIPIENT_IDS = [
     7585,
 ]
 
+LINE_DISPLAY_NAMES = {
+    "ntp1": "НТП-1",
+    "ntp2": "НТП-2",
+}
 
 class WebSocketBridge:
     """
@@ -45,6 +49,10 @@ class WebSocketBridge:
     ) -> None:
         self.okc_client = okc_client
         self.line_name = line_name
+        self.line_title = LINE_DISPLAY_NAMES.get(
+            line_name,
+            line_name,
+        )
 
         self.line = None
 
@@ -260,7 +268,7 @@ class WebSocketBridge:
                 "fcm",
             ],
 
-            title=f"{self.line_name} • {author_name}",
+            title=f"{self.line_title} • {author_name}",
 
             body=message_text,
 
