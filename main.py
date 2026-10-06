@@ -24,11 +24,17 @@ from src.tasks.premium import (
 from src.tasks.sl import fill_sl
 from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
-from src.tasks.ure import (
-    fill_day_kpi,
-    fill_month_kpi,
-    fill_week_kpi,
-)
+
+# TEMP DISABLED:
+# НТП1 и НТП2 объединены в общую линию НТП.
+# Старые OKC unit/report для KPI больше неактуальны.
+# Вернуть после адаптации URE под объединённую линию.
+#
+# from src.tasks.ure import (
+#     fill_day_kpi,
+#     fill_month_kpi,
+#     fill_week_kpi,
+# )
 
 
 try:
@@ -85,29 +91,35 @@ async def run_startup_tasks(
     # но теперь получаем отдельное событие
     # для day/week/month.
 
-    await asyncio.gather(
-        run_tracked_task(
-            "fill_day_kpi",
-            fill_day_kpi,
-            okc_client.api.ure,
-            task_title="Заполнение дневных KPI",
-            source="startup",
-        ),
-        run_tracked_task(
-            "fill_week_kpi",
-            fill_week_kpi,
-            okc_client.api.ure,
-            task_title="Заполнение недельных KPI",
-            source="startup",
-        ),
-        run_tracked_task(
-            "fill_month_kpi",
-            fill_month_kpi,
-            okc_client.api.ure,
-            task_title="Заполнение месячных KPI",
-            source="startup",
-        ),
-    )
+    # TEMP DISABLED:
+    # KPI через OKC URE временно отключены после объединения
+    # НТП1 + НТП2 -> НТП.
+    #
+    # Старые unit/report больше нельзя использовать.
+    # После адаптации общей линии просто вернуть этот блок.
+    # await asyncio.gather(
+    #     run_tracked_task(
+    #         "fill_day_kpi",
+    #         fill_day_kpi,
+    #         okc_client.api.ure,
+    #         task_title="Заполнение дневных KPI",
+    #         source="startup",
+    #     ),
+    #     run_tracked_task(
+    #         "fill_week_kpi",
+    #         fill_week_kpi,
+    #         okc_client.api.ure,
+    #         task_title="Заполнение недельных KPI",
+    #         source="startup",
+    #     ),
+    #     run_tracked_task(
+    #         "fill_month_kpi",
+    #         fill_month_kpi,
+    #         okc_client.api.ure,
+    #         task_title="Заполнение месячных KPI",
+    #         source="startup",
+    #     ),
+    # )
 
     await run_tracked_task(
         "premium_heads",
