@@ -47,9 +47,8 @@ class Settings(BaseSettings):
     # Настройки WebSocket
     WS_LINES: list[str] = [
         "nck",
-        "ntp1",
-        "ntp2",
-    ]  # Линии для подключения: nck, ntp1, ntp2
+        "ntp",
+    ]  # Линии для подключения: nck, ntp
 
     @field_validator("WS_LINES", mode="before")
     @classmethod

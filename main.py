@@ -222,8 +222,7 @@ async def main():
         await setup_ws_bridges(
             okc_client,
             lines=[
-                "ntp1",
-                "ntp2",
+                "ntp"
             ],
         )
 

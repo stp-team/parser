@@ -29,6 +29,7 @@ OKC_NOTIFICATION_RECIPIENT_IDS = [
 LINE_DISPLAY_NAMES = {
     "ntp1": "НТП-1",
     "ntp2": "НТП-2",
+    "ntp": "НТП",
 }
 
 class WebSocketBridge:
