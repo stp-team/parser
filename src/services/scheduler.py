@@ -24,14 +24,11 @@ from src.tasks.premium import (
 from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
 
-# TEMP DISABLED:
-# KPI временно отключены после объединения НТП1/НТП2.
-#
-# from src.tasks.ure import (
-#     fill_day_kpi,
-#     fill_month_kpi,
-#     fill_week_kpi,
-# )
+from src.tasks.ure import (
+    fill_day_kpi,
+    fill_month_kpi,
+    fill_week_kpi,
+)
 
 
 try:
@@ -184,13 +181,7 @@ class Scheduler:
         self,
     ) -> None:
         await self._setup_employees()
-
-        # TEMP DISABLED:
-        # KPI OKC временно отключены после объединения
-        # НТП1 + НТП2 -> общая НТП.
-        #
-        # await self._setup_kpi()
-
+        await self._setup_kpi()
         await self._setup_premium()
         # await self._setup_tutors()
         # await self._setup_tests()

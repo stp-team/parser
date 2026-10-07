@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import re
+import json
 from typing import Any
 
 from okc_py import OKC
@@ -27,8 +28,6 @@ OKC_NOTIFICATION_RECIPIENT_IDS = [
 ]
 
 LINE_DISPLAY_NAMES = {
-    "ntp1": "НТП-1",
-    "ntp2": "НТП-2",
     "ntp": "НТП",
 }
 
@@ -96,6 +95,16 @@ class WebSocketBridge:
         self.line.on(
             "message",
             self._on_message,
+        )
+
+        self.line.on(
+            "rawData",
+            self._on_raw_data,
+        )
+
+        self.line.on(
+            "rawIncidents",
+            self._on_raw_incidents,
         )
 
         self.is_running = True
@@ -208,6 +217,201 @@ class WebSocketBridge:
         ]
 
         return "\n".join(lines)
+
+    async def _on_raw_incidents(self, data: Any) -> None:
+        """
+        Обновляет список актуальных аварий OKC.
+
+        Берём только объект "new" и только поля:
+        - cities
+        - description
+        - incId
+        - startDate
+        """
+
+        if not isinstance(data, dict):
+            return
+
+        raw_incidents = data.get("new")
+
+        if not isinstance(raw_incidents, list):
+            raw_incidents = []
+
+        incidents = []
+
+        for item in raw_incidents:
+            if not isinstance(item, dict):
+                continue
+
+            incidents.append(
+                {
+                    "cities": item.get("cities"),
+                    "description": item.get("description"),
+                    "incId": item.get("incId"),
+                    "startDate": item.get("startDate"),
+                }
+            )
+
+        # Чтобы перестановка элементов в массиве
+        # не создавала ложное "обновление".
+        incidents.sort(
+            key=lambda item: str(
+                item.get("incId") or ""
+            )
+        )
+
+        payload = {
+            "line": self.line_title,
+            "incidents": incidents,
+            "silent": True,
+        }
+
+        payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        try:
+            redis = await get_redis()
+
+            old_payload = await redis.get(
+                "okc:ntp:incidents"
+            )
+            await redis.set(
+                "okc:ntp:incidents",
+                payload_json,
+                ex=60,
+            )
+            # Состояние аварий не изменилось —
+            # WS-событие повторно не отправляем.
+            if old_payload == payload_json:
+                return
+
+            event = NotificationEvent(
+                event_type="okc.line.incidents",
+                event_service=NotificationServiceInfo(
+                    title="okc_service",
+                ),
+                channels_type=["ws"],
+                title="Аварии НТП",
+                body="Список актуальных аварий обновлён",
+                payload=payload,
+                recipients=NotificationRecipients(
+                    include_ids=(
+                        OKC_NOTIFICATION_RECIPIENT_IDS
+                    ),
+                ),
+            )
+
+            notification_id = await redis.xadd(
+                name=settings.REDIS_NOTIFICATION_STREAM,
+                fields={
+                    "data": event.model_dump_json(),
+                },
+                maxlen=1000,
+                approximate=True,
+            )
+
+            logger.info(
+                "[%s] OKC incidents updated: "
+                "notification_id=%s "
+                "count=%s",
+                self.line_name,
+                notification_id,
+                len(incidents),
+            )
+
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to update "
+                "OKC incidents: %s",
+                self.line_name,
+                e,
+                exc_info=True,
+            )
+
+    async def _on_raw_data(
+            self,
+            data: Any,
+    ) -> None:
+        if not isinstance(data, dict):
+            return
+
+        waiting_queue = data.get(
+            "waitingQueue"
+        )
+
+        talking_queue = data.get(
+            "talkingQueue"
+        )
+
+        if not isinstance(waiting_queue, list):
+            waiting_queue = []
+
+        if not isinstance(talking_queue, list):
+            talking_queue = []
+
+        payload = {
+            "line": self.line_title,
+            "waitingQueue": waiting_queue,
+            "talkingQueue": talking_queue,
+            "silent": True,
+        }
+
+        payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        try:
+            redis = await get_redis()
+
+            old_payload = await redis.get(
+                "okc:ntp:call_queues"
+            )
+
+            # Всегда обновляем актуальное состояние.
+            await redis.set(
+                "okc:ntp:call_queues",
+                payload_json,
+                ex=30,
+            )
+
+            # Ничего не поменялось — фронт не дёргаем.
+            if old_payload == payload_json:
+                return
+
+            event = NotificationEvent(
+                event_type="okc.line.call_queues",
+                event_service=NotificationServiceInfo(title="okc_service"),
+                channels_type=["ws"],
+                title="Очередь НТП",
+                body="Состояние очереди обновлено",
+                payload=payload,
+                recipients=NotificationRecipients(
+                    include_ids=[7920, 7585],
+                ),
+            )
+
+            await redis.xadd(
+                name=settings.REDIS_NOTIFICATION_STREAM,
+                fields={
+                    "data": event.model_dump_json(),
+                },
+                maxlen=1000,
+                approximate=True,
+            )
+
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to update "
+                "OKC call queues: %s",
+                self.line_name,
+                e,
+                exc_info=True,
+            )
 
     async def _on_message(
         self,
@@ -355,8 +559,7 @@ class WebSocketBridgeManager:
 
         # Только НТП1 и НТП2.
         self.lines = lines or [
-            "ntp1",
-            "ntp2",
+            "ntp",
         ]
 
         self.bridges: list[
