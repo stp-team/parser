@@ -281,7 +281,6 @@ class WebSocketBridge:
             await redis.set(
                 "okc:ntp:incidents",
                 payload_json,
-                ex=60,
             )
             # Состояние аварий не изменилось —
             # WS-событие повторно не отправляем.
