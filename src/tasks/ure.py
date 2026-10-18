@@ -445,11 +445,11 @@ def get_ntp_summary_period(
 
     if model_class is SpecDayKPI:
         # Вчера — вчера.
-        end = start
+        end = start + timedelta(days=1)
 
     elif model_class is SpecWeekKPI:
-        # Предыдущая неделя: Понедельник - Воскресенье включительно.
-        end = start + timedelta(days=6)
+        # Предыдущая неделя: предыдущий понедельник - текущий понедельник включительно.
+        end = start + timedelta(days=7)
 
     elif model_class is SpecMonthKPI:
         # Текущий либо предыдущий месяц —
@@ -459,8 +459,7 @@ def get_ntp_summary_period(
             + timedelta(days=4)
         ).replace(day=1)
 
-        month_end = next_month - timedelta(days=1)
-        end = min(month_end, today)
+        end = min(next_month, today)
 
     else:
         raise ValueError(
