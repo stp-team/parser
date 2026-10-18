@@ -5,7 +5,6 @@ from datetime import datetime
 
 from okc_py import PremiumAPI
 from okc_py.api.models.premium import HeadPremiumData, SpecialistPremiumData
-from sqlalchemy import delete
 from stp_database.models.Stats import HeadPremium, SpecPremium
 
 from src.core.db import get_stats_session
@@ -128,104 +127,226 @@ def map_premium_row(
     return premium
 
 
+
 async def fill_premium(
     api: PremiumAPI,
     divisions: list[str],
     periods: list[str],
     is_head: bool,
 ) -> int:
-    """Fill premium data."""
-    premium_type = "Head" if is_head else "Specialist"
-    logger.info(
-        f"[{premium_type} Premium] Starting premium data update for {len(periods)} periods x {len(divisions)} divisions"
+    """
+    Загружает премиум специалистов/РГ.
+
+    Для НТП с октября 2026 используем
+    новый объединённый отчёт.
+
+    Исторический премиум НТП до октября
+    не перезаписываем новым форматом.
+
+    Каждому месяцу соответствует
+    отдельная транзакция.
+    """
+
+    premium_type = (
+        "Head" if is_head else "Specialist"
     )
 
-    async def fetch(period: str, division: str):
-        endpoint = "/api/premium/heads" if is_head else "/api/premium/specialists"
-        if API_TRACKING_AVAILABLE:
-            track_api_call(endpoint, "GET")
-        if is_head:
-            return await api.get_head_premium(period, division)
-        return await api.get_specialist_premium(period, division)
-
-    tasks = [(p, d) for p in periods for d in divisions]
-    logger.info(f"[{premium_type} Premium] Fetching data for {len(tasks)} API calls")
-
-    fetcher = ConcurrentAPIFetcher(semaphore_limit=15)
-    results = await fetcher.fetch_parallel(tasks, fetch)
-
-    premium_objects = []
-    for (_period, _division), result in results:
-        if result is None:
-            continue
-
-        items = result.premium if is_head else result.items
-        for row in items:
-            premium = map_premium_row(row, is_head)
-            if premium.employee_id:
-                premium_objects.append(premium)
-
-    if not premium_objects:
-        logger.warning(f"[{premium_type} Premium] No premium data retrieved from API")
-        return 0
-
-    # API can return the same employee for the same period from different divisions.
-    # Keep only one record per DB primary key to avoid IntegrityError on bulk insert.
-    unique_premium_objects: dict[tuple[int, datetime], SpecPremium | HeadPremium] = {}
-    duplicates_count = 0
-    for premium in premium_objects:
-        key = (premium.employee_id, premium.extraction_period)
-        if key in unique_premium_objects:
-            duplicates_count += 1
-        unique_premium_objects[key] = premium
-
-    if duplicates_count:
-        logger.warning(
-            f"[{premium_type} Premium] Found {duplicates_count} duplicate records "
-            "by (employee_id, extraction_period); keeping the last occurrence"
-        )
-
-    premium_objects = list(unique_premium_objects.values())
-
-    logger.info(
-        f"[{premium_type} Premium] Mapped {len(premium_objects)} premium records"
+    model = (
+        HeadPremium if is_head else SpecPremium
     )
 
-    async with get_stats_session() as session:
-        model = HeadPremium if is_head else SpecPremium
+    ntp_new_report_from = datetime(
+        2026, 10, 1
+    )
 
-        # Get unique periods that will be updated
-        unique_periods = {p.extraction_period for p in premium_objects}
-        periods_str = ", ".join(str(p.date()) for p in sorted(unique_periods))
+    total_saved = 0
+    failed_periods = []
+
+    for period in periods:
         logger.info(
-            f"[{premium_type} Premium] Deleting old data for periods: {periods_str}"
+            "[%s Premium] Начало периода %s",
+            premium_type,
+            period,
         )
 
-        # Delete rows where employee_id is None (data quality cleanup)
-        await session.execute(delete(model).where(model.employee_id.is_(None)))
-
-        # Delete old data for the periods we're about to update
-        # This ensures we get fresh data for the last 2 months (current + previous)
-        for _period in unique_periods:
-            deleted = await session.execute(
-                delete(model).where(model.extraction_period == _period)
-            )
-            logger.debug(
-                f"[{premium_type} Premium] Deleted {deleted.rowcount} rows for period {_period.date()}"
+        try:
+            period_date = datetime.strptime(
+                period,
+                "%m.%Y",
             )
 
-        # Insert fresh data
-        session.add_all(premium_objects)
-        await session.commit()
-        logger.info(
-            f"[{premium_type} Premium] Successfully saved {len(premium_objects)} records"
+            # Не используем новый отчёт НТП
+            # для исторических месяцев, по которым
+            # пока не подтверждена совместимость.
+            if period_date < ntp_new_report_from:
+                period_divisions = [
+                    division
+                    for division in divisions
+                    if division == "НЦК"
+                ]
+
+                logger.info(
+                    "[%s Premium] Период %s: "
+                    "старые данные НТП сохраняются",
+                    premium_type,
+                    period,
+                )
+
+            else:
+                period_divisions = divisions
+
+            if not period_divisions:
+                continue
+
+            async def fetch(
+                division: str,
+            ):
+                if is_head:
+                    return await api.get_head_premium(
+                        period=period,
+                        division=division,
+                    )
+
+                return await api.get_specialist_premium(
+                    period=period,
+                    division=division,
+                )
+
+            fetcher = ConcurrentAPIFetcher(
+                semaphore_limit=4
+            )
+
+            results = await fetcher.fetch_parallel(
+                [(division,) for division in period_divisions],
+                fetch,
+            )
+
+            premium_objects = []
+
+            for (division,), response in results:
+                if response is None:
+                    raise RuntimeError(
+                        f"Не получен премиум {division} "
+                        f"за {period}"
+                    )
+
+                items = (
+                    response.premium
+                    if is_head
+                    else response.items
+                )
+
+                if not items:
+                    raise RuntimeError(
+                        f"Пустой премиум {division} "
+                        f"за {period}"
+                    )
+
+                logger.info(
+                    "[%s Premium] %s / %s: %s строк",
+                    premium_type,
+                    division,
+                    period,
+                    len(items),
+                )
+
+                # Проверка, что сервер вернул
+                # именно запрошенный месяц.
+                for row in items:
+                    row_period = datetime.strptime(
+                        row.period,
+                        "%d.%m.%Y",
+                    )
+
+                    if row_period != period_date:
+                        raise ValueError(
+                            "Период ответа ЕОС "
+                            "не совпадает с запросом: "
+                            f"{row.period} != {period}"
+                        )
+
+                    premium = map_premium_row(
+                        row,
+                        is_head,
+                    )
+
+                    if premium.employee_id:
+                        premium_objects.append(premium)
+
+            if not premium_objects:
+                raise RuntimeError(
+                    f"Нет записей премиума за {period}"
+                )
+
+            # Не берём последний дубль молча:
+            # он может относиться к другой
+            # группе или направлению.
+            unique_objects = {}
+
+            for premium in premium_objects:
+                key = (
+                    premium.employee_id,
+                    premium.extraction_period,
+                )
+
+                if key in unique_objects:
+                    raise RuntimeError(
+                        "[Premium] Повторяющийся "
+                        f"employee_id за период: {key}"
+                    )
+
+                unique_objects[key] = premium
+
+            premium_objects = list(
+                unique_objects.values()
+            )
+
+            # Важно: здесь больше нет
+            # DELETE всего периода.
+            #
+            # merge обновит существующего
+            # сотрудника либо добавит нового.
+            # Другие записи и старые месяцы
+            # не затрагиваются.
+            async with get_stats_session() as session:
+                async with session.begin():
+
+                    for premium in premium_objects:
+                        await session.merge(premium)
+
+                    await session.flush()
+
+            total_saved += len(premium_objects)
+
+            logger.info(
+                "[%s Premium] %s: сохранено %s строк",
+                premium_type,
+                period,
+                len(premium_objects),
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "[%s Premium] Ошибка за %s: %s",
+                premium_type,
+                period,
+                exc,
+            )
+
+            failed_periods.append(period)
+
+    # Периоды обрабатываются независимо.
+    # Если сентябрь недоступен, октябрь всё
+    # равно может успешно сохраниться.
+    if failed_periods:
+        raise RuntimeError(
+            f"[{premium_type} Premium] "
+            "Не удалось обработать периоды: "
+            f"{failed_periods}. "
+            f"Успешно сохранено строк: {total_saved}"
         )
 
-    logger.info(
-        f"[{premium_type} Premium] Completed: {len(premium_objects)} records saved"
-    )
-    return len(premium_objects)
-
+    return total_saved
 
 @log_processing_time("Specialist Premium data processing")
 async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -> int:
@@ -243,11 +364,23 @@ async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -
     Returns:
         Number of records saved
     """
-    from src.services.constants import unites
+    periods = (
+        [period]
+        if period
+        else get_recent_periods(2)
+    )
 
-    periods = [period] if period else get_recent_periods(2)
-    logger.info(f"[Specialist Premium] Updating periods: {periods}")
-    count = await fill_premium(api, unites, periods, is_head=False)
+    logger.info(
+        "[Specialist Premium] Периоды: %s",
+        periods,
+    )
+
+    count = await fill_premium(
+        api=api,
+        divisions=["НТП", "НЦК"],
+        periods=periods,
+        is_head=False,
+    )
     logger.info(f"[Specialist Premium] Update completed: {count} records")
     return count
 

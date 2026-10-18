@@ -2,6 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
+from collections import Counter
 
 from okc_py import UreAPI
 from okc_py.api.models import ThanksReportItem
@@ -15,6 +16,7 @@ from okc_py.api.models.ure import (
     POKDataRecord,
     SalesDataRecord,
     SalesPotentialDataRecord,
+    NTPSummaryResponse,
 )
 from okc_py.api.repos.thanks import ThanksAPI
 from sqlalchemy import and_, delete, func, select
@@ -28,7 +30,7 @@ from src.services.helpers import (
     get_week_start_date,
     get_yesterday_date,
 )
-from src.tasks.base import BatchDBOperator, ConcurrentAPIFetcher, log_processing_time
+from src.tasks.base import ConcurrentAPIFetcher, log_processing_time
 
 # Optional API tracking
 try:
@@ -349,12 +351,137 @@ def aggregate_kpi_data(
     ]
 
 
+def aggregate_ntp_summary(
+    response: NTPSummaryResponse,
+    model_class: type,
+    extraction_period: datetime,
+) -> tuple[list, set[int]]:
+    """Преобразует сводный отчёт НТП в существующие KPI."""
+
+    id_counts = Counter(
+        row.id for row in response.data
+    )
+
+    duplicate_ids = {
+        employee_id
+        for employee_id, count in id_counts.items()
+        if count > 1
+    }
+
+    if duplicate_ids:
+        logger.warning(
+            "[NTP KPI] Повторяющиеся employee_id: %s. "
+            "Их показатели не объединяем автоматически.",
+            sorted(duplicate_ids),
+        )
+
+    result = []
+
+    for row in response.data:
+        # Нельзя просто взять последнюю строку:
+        # в ЕОС сотрудник может встречаться
+        # несколько раз под разными руководителями.
+        if row.id in duplicate_ids:
+            continue
+
+        if row.unit_name.strip().casefold() != "нтп":
+            raise ValueError(
+                "В сводном отчёте НТП найдено "
+                f"другое направление: {row.unit_name}"
+            )
+
+        kpi = model_class()
+        kpi.employee_id = row.id
+        kpi.extraction_period = extraction_period
+
+        kpi.contacts_count = row.calls
+
+        kpi.csat = row.csat
+        kpi.csi = row.csi
+        kpi.pok = row.response_rate
+        kpi.flr = row.flr
+        kpi.aht = row.aht
+        kpi.delay = row.delay_percent
+
+        kpi.sales = row.sales_equipment
+        kpi.services = row.sales_ps
+        kpi.sales_potential = row.sales_requests
+
+        kpi.thanks = row.gratitude
+
+        result.append(kpi)
+
+    if not result:
+        raise RuntimeError(
+            "После проверки сводного отчёта НТП "
+            "не осталось KPI для сохранения"
+        )
+
+    logger.info(
+        "[NTP KPI] Строк=%s, обработано=%s, "
+        "повторяющихся ID=%s",
+        len(response.data),
+        len(result),
+        len(duplicate_ids),
+    )
+
+    return result, duplicate_ids
+
+
+def get_ntp_summary_period(
+    model_class: type,
+    extraction_period: datetime,
+) -> tuple[datetime, datetime]:
+    """Определяет даты нового сводного отчёта."""
+
+    today = datetime.now().replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    start = extraction_period
+
+    if model_class is SpecDayKPI:
+        # Вчера — вчера.
+        end = start
+
+    elif model_class is SpecWeekKPI:
+        # Предыдущая неделя: Понедельник - Воскресенье включительно.
+        end = start + timedelta(days=6)
+
+    elif model_class is SpecMonthKPI:
+        # Текущий либо предыдущий месяц —
+        # определяется существующим helper.
+        next_month = (
+            start.replace(day=28)
+            + timedelta(days=4)
+        ).replace(day=1)
+
+        month_end = next_month - timedelta(days=1)
+        end = min(month_end, today)
+
+    else:
+        raise ValueError(
+            f"Неизвестная KPI-модель: {model_class}"
+        )
+
+    if end < start:
+        raise ValueError(
+            "Некорректный период KPI"
+        )
+
+    return start, end
+
+
 async def fetch_kpi_reports(
     api: UreAPI,
     divisions: list[str],
     report_types: list[str],
     start_date: datetime = None,
     use_week_period: bool = False,
+    end_date: datetime | None = None,
 ) -> list:
     """Fetch KPI reports from API using concurrent fetcher."""
 
@@ -370,6 +497,7 @@ async def fetch_kpi_reports(
                     division=division,
                     report=report_type,
                     start_date=start_date,
+                    end_date=end_date,
                     use_week_period=use_week_period,
                 )
             else:
@@ -449,27 +577,93 @@ async def fetch_thanks_reports(
     ]
 
 
-async def save_kpi_data(data: list, model_class: type) -> int:
-    """Save KPI data to database using BatchDBOperator."""
 
-    async def delete_old_data():
-        async with get_stats_session() as session:
-            await session.execute(
-                delete(model_class).where(model_class.employee_id.is_(None))
-            )
-            await session.execute(delete(model_class))
-            await session.commit()
+async def save_kpi_data(
+    data: list,
+    model_class: type,
+    extraction_period: datetime,
+    preserve_employee_ids: set[int] | None = None,
+) -> int:
+    """
+    Атомарно заменяет KPI за один период.
+
+    Все остальные периоды остаются без изменений.
+    """
 
     if not data:
-        return 0
+        raise ValueError(
+            "Пустой набор KPI. Запись отменена."
+        )
+
+    preserve_employee_ids = (
+        preserve_employee_ids or set()
+    )
+
+    keys = set()
+
+    for item in data:
+        if not item.employee_id:
+            raise ValueError(
+                "У KPI отсутствует employee_id"
+            )
+
+        if item.extraction_period != extraction_period:
+            raise ValueError(
+                "Некорректный extraction_period"
+            )
+
+        key = (
+            item.employee_id,
+            item.extraction_period,
+        )
+
+        if key in keys:
+            raise ValueError(
+                f"Дублирующийся KPI: {key}"
+            )
+
+        if item.employee_id in preserve_employee_ids:
+            raise ValueError(
+                "Нельзя одновременно сохранить и "
+                "сохранить старую запись одного ID"
+            )
+
+        keys.add(key)
 
     async with get_stats_session() as session:
-        db_operator = BatchDBOperator(session)
-        return await db_operator.bulk_insert_with_cleanup(
-            data_list=data,
-            delete_func=delete_old_data,
-            operation_name=f"{model_class.__name__} Update",
-        )
+        async with session.begin():
+
+            delete_query = delete(model_class).where(
+                model_class.extraction_period
+                == extraction_period
+            )
+
+            if preserve_employee_ids:
+                delete_query = delete_query.where(
+                    model_class.employee_id.notin_(
+                        preserve_employee_ids
+                    )
+                )
+
+            await session.execute(delete_query)
+
+            session.add_all(data)
+
+            # Ошибка вставки откатит и DELETE,
+            # и INSERT одной транзакцией.
+            await session.flush()
+
+    logger.info(
+        "[%s] Записано %s строк за %s; "
+        "сохранено старых ID=%s",
+        model_class.__name__,
+        len(data),
+        extraction_period,
+        len(preserve_employee_ids),
+    )
+
+    return len(data)
+
 
 
 async def process_kpi(
@@ -479,71 +673,197 @@ async def process_kpi(
     start_date: datetime = None,
     use_week_period: bool = False,
 ) -> int:
-    """Process KPI data for given period."""
-    from src.services.constants import unites
+    """
+    Обновляет KPI за период.
+
+    НТП — новый сводный отчёт 113.
+    НЦК — существующие отдельные отчёты.
+    """
 
     model_name = model_class.__name__
-    logger.info(f"[{model_name}] Processing KPI data for period: {extraction_period}")
 
-    report_types = [
-        "AHT",
-        "FLR",
-        "CSI",
-        "POK",
-        "DELAY",
-        "Sales",
-        "SalesPotential",
-        "PaidService",
-        "CSAT",
+    logger.info(
+        "[%s] Начало обработки периода %s",
+        model_name,
+        extraction_period,
+    )
+
+    # 1. Получаем НТП из сводного отчёта.
+    ntp_start, ntp_end = get_ntp_summary_period(
+        model_class,
+        extraction_period,
+    )
+
+    ntp_response = await api.get_ntp_summary_report(
+        start_date=ntp_start,
+        end_date=ntp_end,
+    )
+
+    ntp_records, ntp_duplicate_ids = (
+        aggregate_ntp_summary(
+            ntp_response,
+            model_class,
+            extraction_period,
+        )
+    )
+
+    # 2. Получаем НЦК старым способом.
+    # Берём только реально настроенные в okc-py
+    # отчёты, не пытаясь вызвать CSI/DELAY,
+    # которых сейчас нет в reports["НЦК"].
+    nck_report_types = [
+        report_type
+        for report_type in REPORT_TYPES
+        if report_type in api.reports["НЦК"]
     ]
-    logger.info(
-        f"[{model_name}] Fetching {len(unites)} divisions x {len(report_types)} report types"
+
+    nck_results = await fetch_kpi_reports(
+        api=api,
+        divisions=["НЦК"],
+        report_types=nck_report_types,
+        start_date=start_date,
+        end_date=(
+            ntp_end
+            if model_class is SpecWeekKPI
+            else None
+        ),
+        use_week_period=False,
     )
 
-    api_results = await fetch_kpi_reports(
-        api, unites, report_types, start_date, use_week_period
-    )
-    logger.info(
-        f"[{model_name}] Fetched {len(api_results)} API results, aggregating data"
+    received_types = {
+        report_type
+        for (division, report_type), report in nck_results
+        if (
+            division == "НЦК"
+            and report is not None
+            and bool(report.data)
+        )
+    }
+
+    missing_types = (
+        set(nck_report_types) - received_types
     )
 
-    # Fetch thanks data
-    thanks_unit_ids = list(api.unites.values())
+    if missing_types:
+        raise RuntimeError(
+            "[KPI] Не получены отчёты НЦК: "
+            f"{sorted(missing_types)}. "
+            "Сохранение отменено."
+        )
+
+    # 3. Благодарности для НЦК.
+    # Для НТП отдельный запрос уже не нужен:
+    # значение пришло в поле GRATITUDE.
+    thanks_unit_ids = [
+        api.unites["НЦК"],
+    ]
 
     if start_date:
         if use_week_period:
-            end_date = start_date + timedelta(days=7)
-        elif model_name == "SpecMonthKPI":
-            if start_date.month == 12:
-                end_date = start_date.replace(year=start_date.year + 1, month=1, day=1)
-            else:
-                end_date = start_date.replace(month=start_date.month + 1, day=1)
+            thanks_end_date = (
+                start_date + timedelta(days=7)
+            )
+
+        elif model_class is SpecMonthKPI:
+            thanks_end_date = (
+                start_date.replace(day=28)
+                + timedelta(days=4)
+            ).replace(day=1)
+
         else:
-            end_date = start_date + timedelta(days=1)
-        thanks_start = start_date.strftime("%d.%m.%Y")
-        thanks_end = end_date.strftime("%d.%m.%Y")
+            thanks_end_date = (
+                start_date + timedelta(days=1)
+            )
+
+        thanks_start = start_date.strftime(
+            "%d.%m.%Y"
+        )
+        thanks_end = thanks_end_date.strftime(
+            "%d.%m.%Y"
+        )
+
     else:
         yesterday = get_yesterday_date()
-        thanks_start = yesterday.strftime("%d.%m.%Y")
-        thanks_end = (yesterday + timedelta(days=1)).strftime("%d.%m.%Y")
+
+        thanks_start = yesterday.strftime(
+            "%d.%m.%Y"
+        )
+        thanks_end = (
+            yesterday + timedelta(days=1)
+        ).strftime("%d.%m.%Y")
+
+    thanks_results = await fetch_thanks_reports(
+        api=api,
+        divisions=thanks_unit_ids,
+        start_date=thanks_start,
+        stop_date=thanks_end,
+    )
+
+    # 4. Собираем старые показатели НЦК.
+    nck_records = aggregate_kpi_data(
+        nck_results,
+        model_class,
+        extraction_period,
+        thanks_results,
+    )
+
+    if not nck_records:
+        raise RuntimeError(
+            "[KPI] После обработки НЦК "
+            "не осталось записей. "
+            "Сохранение отменено."
+        )
+
+    # 5. Проверяем пересечения сотрудников
+    # между направлениями.
+    ntp_ids = {
+        item.employee_id
+        for item in ntp_records
+    }
+
+    nck_ids = {
+        item.employee_id
+        for item in nck_records
+    }
+
+    overlapping_ids = ntp_ids & nck_ids
+
+    if overlapping_ids:
+        raise RuntimeError(
+            "[KPI] Один сотрудник присутствует "
+            "в НТП и НЦК одновременно: "
+            f"{sorted(overlapping_ids)}"
+        )
+
+    if ntp_duplicate_ids & nck_ids:
+        raise RuntimeError(
+            "[KPI] Повторяющиеся ID НТП "
+            "обнаружены также в НЦК. "
+            "Нужна отдельная агрегация."
+        )
+
+    # 6. Единый набор сотрудников.
+    kpi_data = ntp_records + nck_records
+
+    # 7. Сохраняем только нужный период.
+    # Ранее существовавшие KPI сотрудников
+    # с неоднозначными строками не удаляем.
+    saved_count = await save_kpi_data(
+        data=kpi_data,
+        model_class=model_class,
+        extraction_period=extraction_period,
+        preserve_employee_ids=ntp_duplicate_ids,
+    )
 
     logger.info(
-        f"[{model_name}] Fetching thanks data for period {thanks_start} - {thanks_end}"
-    )
-    thanks_results = await fetch_thanks_reports(
-        api, thanks_unit_ids, thanks_start, thanks_end
+        "[%s] KPI сохранены: "
+        "НТП=%s, НЦК=%s, всего=%s",
+        model_name,
+        len(ntp_records),
+        len(nck_records),
+        saved_count,
     )
 
-    kpi_data = aggregate_kpi_data(
-        api_results, model_class, extraction_period, thanks_results
-    )
-    if not kpi_data:
-        logger.warning(f"[{model_name}] No KPI data aggregated after processing")
-        return 0
-
-    logger.info(f"[{model_name}] Aggregated {len(kpi_data)} employee records")
-    saved_count = await save_kpi_data(kpi_data, model_class)
-    logger.info(f"[{model_name}] Saved {saved_count} records to database")
     return saved_count
 
 
@@ -568,7 +888,7 @@ async def fill_day_kpi(api: UreAPI) -> None:
 @log_processing_time("Weekly KPI data processing")
 async def fill_week_kpi(api: UreAPI) -> None:
     """Fill weekly KPI data and update with user_id and questions count."""
-    extraction_date = get_week_start_date()
+    extraction_date = (get_week_start_date() - timedelta(days=7))
     logger.info(f"Starting weekly KPI data update for {extraction_date}")
     count = await process_kpi(
         api,
@@ -773,7 +1093,7 @@ async def update_day_kpi_user_id_and_questions() -> int:
 @log_processing_time("Weekly KPI user_id and questions update")
 async def update_week_kpi_user_id_and_questions() -> int:
     """Update weekly KPI records with user_id and questions count."""
-    extraction_date = get_week_start_date()
+    extraction_date = (get_week_start_date() - timedelta(days=7))
     logger.info(
         f"Starting weekly KPI user_id and questions update for {extraction_date}"
     )
