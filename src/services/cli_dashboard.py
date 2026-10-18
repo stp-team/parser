@@ -39,7 +39,7 @@ class CLIDashboard:
         self.console = Console()
         self.log_queue: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1000)
         self.log_messages: list[Text] = []
-        self.max_logs = 10
+        self.max_logs = 1000
         self.refresh_per_second = refresh_per_second
         self._running = False
         self._live: Live | None = None
@@ -193,19 +193,45 @@ class CLIDashboard:
         )
 
     def _create_logs_panel(self) -> Panel:
-        if not self.log_messages:
-            logs_text = Text("Ожидаем логи...", style="dim")
+        # Размер доступной области:
+        # 3 строки заголовка + 13 строк статистики.
+        available_height = max(
+            5,
+            self.console.size.height - 18,
+        )
+
+        # Пока отображаем последние строки,
+        # которые помещаются на экран.
+        visible_logs = self.log_messages[
+            -available_height:
+        ]
+
+        if not visible_logs:
+            logs_text = Text(
+                "Ожидаем логи...",
+                style="dim",
+            )
         else:
             logs_text = Text()
-            for msg in self.log_messages:
-                logs_text.append(msg)
-                logs_text.append("\n")
+
+            for index, message in enumerate(
+                visible_logs
+            ):
+                if index:
+                    logs_text.append("\n")
+
+                logs_text.append(message)
 
         return Panel(
             logs_text,
-            title=Text("📝 Логи", style="bold blue"),
+            title=Text(
+                f"📝 Логи "
+                f"({len(self.log_messages)} / "
+                f"{self.max_logs})",
+                style="bold blue",
+            ),
             border_style="bright_black",
-            height=self.max_logs + 2,
+            height=available_height + 2,
         )
 
     def _generate_layout(self) -> Layout:
@@ -213,7 +239,14 @@ class CLIDashboard:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="stats", size=13),
-            Layout(name="logs", size=14),
+
+            # Логи занимают всё оставшееся
+            # пространство терминала.
+            Layout(
+                name="logs",
+                ratio=1,
+                minimum_size=7,
+            ),
         )
 
         total_api_calls = api_tracker.get_total_calls()

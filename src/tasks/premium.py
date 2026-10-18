@@ -364,14 +364,24 @@ async def fill_specialists_premium(api: PremiumAPI, period: str | None = None) -
     Returns:
         Number of records saved
     """
-    periods = (
-        [period]
-        if period
-        else get_recent_periods(2)
-    )
+    # Новую схему премиума НТП используем
+    # с октября 2026 года.
+    premium_start = datetime(2026, 10, 1)
+
+    if period:
+        # Явный запрос периода оставляем без изменений.
+        periods = [period]
+    else:
+        # Автоматически обновляем только месяцы,
+        # начиная с перехода на объединённую НТП.
+        periods = [
+            p
+            for p in get_recent_periods(2)
+            if datetime.strptime(p, "%m.%Y") >= premium_start
+        ]
 
     logger.info(
-        "[Specialist Premium] Периоды: %s",
+        "[Specialist Premium] Периоды для обновления: %s",
         periods,
     )
 
