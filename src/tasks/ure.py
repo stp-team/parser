@@ -577,6 +577,7 @@ async def fetch_thanks_reports(
 
 
 
+
 async def save_kpi_data(
     data: list,
     model_class: type,
@@ -584,86 +585,175 @@ async def save_kpi_data(
     preserve_employee_ids: set[int] | None = None,
 ) -> int:
     """
-    Атомарно заменяет KPI за один период.
+    KPI без накопления исторических строк.
 
-    Все остальные периоды остаются без изменений.
+    На каждого сотрудника в каждой KPI-таблице
+    остаётся максимум одна запись.
+
+    Существующего сотрудника обновляем через UPDATE.
+    Нового сотрудника добавляем один раз.
     """
 
     if not data:
         raise ValueError(
-            "Пустой набор KPI. Запись отменена."
+            "Пустая выгрузка KPI. Обновление отменено."
         )
 
-    preserve_employee_ids = (
-        preserve_employee_ids or set()
+    preserve_employee_ids = set(
+        preserve_employee_ids or ()
     )
 
-    keys = set()
+    incoming_by_id = {}
 
+    # Проверяем данные до обращения к БД.
     for item in data:
-        if not item.employee_id:
+        employee_id = item.employee_id
+
+        if not employee_id:
             raise ValueError(
-                "У KPI отсутствует employee_id"
+                "Отсутствует employee_id"
             )
 
         if item.extraction_period != extraction_period:
             raise ValueError(
-                "Некорректный extraction_period"
+                f"Некорректный период сотрудника "
+                f"{employee_id}"
             )
 
-        key = (
-            item.employee_id,
-            item.extraction_period,
-        )
-
-        if key in keys:
+        if employee_id in incoming_by_id:
             raise ValueError(
-                f"Дублирующийся KPI: {key}"
+                f"Повторяющийся employee_id: "
+                f"{employee_id}"
             )
 
-        if item.employee_id in preserve_employee_ids:
+        if employee_id in preserve_employee_ids:
             raise ValueError(
-                "Нельзя одновременно сохранить и "
-                "сохранить старую запись одного ID"
+                f"Неоднозначный сотрудник "
+                f"{employee_id} попал в обновление"
             )
 
-        keys.add(key)
+        incoming_by_id[employee_id] = item
+
+    updated_count = 0
+    created_count = 0
+    removed_duplicates = 0
 
     async with get_stats_session() as session:
         async with session.begin():
 
-            delete_query = delete(model_class).where(
-                model_class.extraction_period
-                == extraction_period
+            # Получаем уже существующие записи.
+            result = await session.execute(
+                select(model_class).with_for_update()
             )
 
-            if preserve_employee_ids:
-                delete_query = delete_query.where(
-                    model_class.employee_id.notin_(
-                        preserve_employee_ids
-                    )
+            existing_rows = result.scalars().all()
+
+            rows_by_employee = {}
+
+            for row in existing_rows:
+                rows_by_employee.setdefault(
+                    row.employee_id, []
+                ).append(row)
+
+            # Выбираем одну актуальную строку
+            # каждого сотрудника.
+            keepers = {}
+
+            for employee_id, rows in rows_by_employee.items():
+
+                # Если запись за нужную дату уже есть,
+                # оставляем именно её.
+                # Иначе берём последнюю по дате.
+                keeper = max(
+                    rows,
+                    key=lambda row: (
+                        row.extraction_period
+                        == extraction_period,
+                        row.extraction_period
+                        or datetime.min,
+                    ),
                 )
 
-            await session.execute(delete_query)
+                keepers[employee_id] = keeper
 
-            session.add_all(data)
+                # Убираем накопленные ранее
+                # строки того же сотрудника.
+                for row in rows:
+                    if row is keeper:
+                        continue
 
-            # Ошибка вставки откатит и DELETE,
-            # и INSERT одной транзакцией.
+                    await session.delete(row)
+                    removed_duplicates += 1
+
+            # Сначала выполняем удаления,
+            # чтобы не столкнуться с составным PK.
+            await session.flush()
+
+            # Переносим только обычные колонки.
+            # Вычисляемые SQL-колонки не трогаем.
+            update_columns = [
+                column.key
+                for column in model_class.__table__.columns
+                if (
+                    column.key not in {
+                        "employee_id",
+                        "extraction_period",
+                        "updated_at",
+                        "q_asked",
+                        "q_answered",
+                    }
+                    and column.computed is None
+                )
+            ]
+
+            for employee_id, new_item in incoming_by_id.items():
+
+                existing = keepers.get(employee_id)
+
+                if existing is None:
+                    # Сотрудника ещё никогда не было
+                    # в этой KPI-таблице.
+                    session.add(new_item)
+                    created_count += 1
+                    continue
+
+                # Обновляем именно существующую строку.
+                for field_name in update_columns:
+                    setattr(
+                        existing,
+                        field_name,
+                        getattr(new_item, field_name),
+                    )
+
+                # Переносим дату на новый период.
+                existing.extraction_period = extraction_period
+                existing.updated_at = datetime.now()
+
+                # Будут рассчитаны отдельной задачей
+                # update_kpi_with_user_id_and_questions().
+                existing.q_asked = 0
+                existing.q_answered = 0
+
+                updated_count += 1
+
+            # Одна транзакция:
+            # при ошибке откатятся все операции.
             await session.flush()
 
     logger.info(
-        "[%s] Записано %s строк за %s; "
-        "сохранено старых ID=%s",
+        "[%s] KPI обновлены за %s: "
+        "UPDATE=%s, INSERT новых сотрудников=%s, "
+        "удалено исторических дублей=%s, "
+        "неоднозначных ID=%s",
         model_class.__name__,
-        len(data),
         extraction_period,
+        updated_count,
+        created_count,
+        removed_duplicates,
         len(preserve_employee_ids),
     )
 
-    return len(data)
-
-
+    return updated_count + created_count
 
 async def process_kpi(
     api: UreAPI,
