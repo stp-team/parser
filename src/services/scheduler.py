@@ -13,6 +13,7 @@ from okc_py import OKC
 
 from src.core.config import settings
 from src.services.parser_events import run_tracked_task
+from src.tasks.sales_rg import fill_rg_sales
 from src.tasks.employees import (
     fill_employee_ids,
     fill_employment_dates,
@@ -183,6 +184,7 @@ class Scheduler:
         await self._setup_employees()
         await self._setup_kpi()
         await self._setup_premium()
+        await self._setup_sales_rg()
         # await self._setup_tutors()
         # await self._setup_tests()
 
@@ -255,6 +257,32 @@ class Scheduler:
             "настроены на часы: %s",
             dossier_hours,
         )
+
+    async def _setup_sales_rg(self) -> None:
+        self.scheduler.add_job(
+            self._safe_job_wrapper(
+                fill_rg_sales,
+                "fill_rg_sales",
+                "Обновление факта продаж РГ",
+            ),
+            trigger=CronTrigger(
+                hour=10,
+                minute=0,
+            ),
+            args=[
+                self.okc_client.api.ure,
+            ],
+            id="fill_rg_sales",
+            name="Факт продаж РГ НТП и НЦК",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+        self.logger.info(
+            "[Scheduler] Факт продаж РГ: "
+            "ежедневно в 10:00"
+        )
+
 
     async def _setup_kpi(
         self,

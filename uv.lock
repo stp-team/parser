@@ -367,7 +367,7 @@ wheels = [
 [[package]]
 name = "okc-py"
 version = "1.4.1"
-source = { git = "https://github.com/stp-team/okc-py.git#2f2466679d7ff324e0d265a88b228d2c47a66756" }
+source = { git = "https://github.com/stp-team/okc-py.git#af206ae078b48ef6235c760ee2bffaff7181cf6f" }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
     { name = "pydantic" },
@@ -643,7 +643,7 @@ wheels = [
 [[package]]
 name = "stp-database"
 version = "2.0"
-source = { git = "https://github.com/STP-Team/stp-database?branch=main#b7d88845952c80471b1f4280c96b8c7653b32d36" }
+source = { git = "https://github.com/STP-Team/stp-database?branch=main#f0381892d387cca8263b9de5173445c9dc11583d" }
 dependencies = [
     { name = "aiomysql" },
     { name = "pytz" },
