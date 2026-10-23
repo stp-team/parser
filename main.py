@@ -24,6 +24,7 @@ from src.tasks.premium import (
 from src.tasks.sl import fill_sl
 from src.tasks.tests import fill_assigned_tests
 from src.tasks.tutors import fill_tutor_schedule
+from src.tasks.sales_rg import fill_rg_sales
 
 from src.tasks.ure import (
     fill_day_kpi,
@@ -127,6 +128,14 @@ async def run_startup_tasks(
         task_title=(
             "Обновление премиума специалистов"
         ),
+        source="startup",
+    )
+
+    await run_tracked_task(
+        "fill_rg_sales",
+        fill_rg_sales,
+        okc_client.api.ure,
+        task_title="Обновление факта продаж РГ НТП и НЦК",
         source="startup",
     )
 
