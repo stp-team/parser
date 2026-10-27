@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 
 from okc_py import UreAPI
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from stp_database.models.Stats import SalesRg
 
@@ -223,6 +223,53 @@ async def sync_sales_month(
                     )
                 )
 
+            # История продаж за завершённый день.
+            # Сохраняется в той же транзакции,
+            # что и основной накопительный факт.
+
+            fact_as_of = (
+                end_date - timedelta(days=1)
+            ).date()
+
+            snapshot_query = text("""
+                INSERT INTO SalesRgDaily (
+                    employee_id,
+                    extraction_period,
+                    fact_as_of,
+                    division,
+                    general_plan,
+                    general_fact,
+                    captured_at
+                )
+                SELECT
+                    employee_id,
+                    extraction_period,
+                    :fact_as_of,
+                    division,
+                    general_plan,
+                    general_fact,
+                    NOW()
+                FROM SalesRg
+                WHERE employee_id = :employee_id
+                  AND extraction_period = :period
+
+                ON DUPLICATE KEY UPDATE
+                    division = VALUES(division),
+                    general_plan = VALUES(general_plan),
+                    general_fact = VALUES(general_fact),
+                    captured_at = NOW()
+            """)
+
+            for employee_id in prepared:
+                await session.execute(
+                    snapshot_query,
+                    {
+                        "employee_id": employee_id,
+                        "period": period,
+                        "fact_as_of": fact_as_of,
+                    },
+                )
+
     logger.info(
         "[SalesRg] Факт за %s сохранён. "
         "РГ=%s, НТП/НЦК получены",
@@ -271,10 +318,29 @@ async def fill_rg_sales(api: UreAPI) -> int:
 
     # Очистка выполняется только после
     # успешного получения запрошенных фактов.
-    oldest_allowed = shift_month(
-        current,
-        -2,
+    quarter_first_month = (
+        (now.month - 1) // 3
+    ) * 3 + 1
+
+    current_quarter_start = datetime(
+        now.year,
+        quarter_first_month,
+        1,
     )
+
+    # В первые 3 дня нового квартала
+    # сохраняем и предыдущий квартал
+    # для итогового отчёта.
+    if (
+        now.month in (1, 4, 7, 10)
+        and now.day <= 3
+    ):
+        oldest_allowed = shift_month(
+            current_quarter_start,
+            -3,
+        )
+    else:
+        oldest_allowed = current_quarter_start
 
     async with get_stats_session() as session:
         async with session.begin():
