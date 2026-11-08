@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 OKC_NOTIFICATION_RECIPIENT_IDS = [
     7920,
     7585,
+    8249,
 ]
 
 LINE_DISPLAY_NAMES = {
