@@ -18,7 +18,7 @@ from src.core.db import get_backend_session, get_stats_session
 
 logger = logging.getLogger(__name__)
 
-POLL_SECONDS = 60
+POLL_SECONDS = 300
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
