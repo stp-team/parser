@@ -258,11 +258,25 @@ async def fetch_raw_report(
     if session is None or session.closed:
         raise RuntimeError("Сессия OKC не подключена")
 
+    logger.info(
+        "OKC REQUEST: url=%s, payload=%s",
+        url,
+        json.dumps(payload, ensure_ascii=False),
+    )
+
     async with session.post(
         url,
         json=payload,
         timeout=ClientTimeout(total=120),
     ) as response:
+        if response.status >= 400:
+            error_body = await response.text()
+            logger.error(
+                "OKC ERROR: status=%s, body=%s",
+                response.status,
+                error_body[:3000],
+            )
+
         response.raise_for_status()
 
         if response.url.path.rstrip("/") == "/site/login":
