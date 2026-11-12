@@ -31,6 +31,25 @@ questions_engine = create_engine(
     db_name=settings.DB_QUESTIONS_NAME,
 )
 
+backend_engine = create_engine(
+    host=settings.DB_HOST,
+    port=settings.DB_PORT,
+    username=settings.DB_USER,
+    password=settings.DB_PASSWORD,
+    db_name=settings.DB_BACKEND_NAME,
+)
+
+parser_engine = create_engine(
+    host=settings.DB_HOST,
+    port=settings.DB_PORT,
+    username=settings.DB_USER,
+    password=settings.DB_PASSWORD,
+    db_name=settings.DB_PARSER_NAME,
+)
+
+backend_session_pool = create_session_pool(backend_engine)
+parser_session_pool = create_session_pool(parser_engine)
+
 stp_session_pool = create_session_pool(stp_engine)
 stats_session_pool = create_session_pool(stats_engine)
 questions_session_pool = create_session_pool(questions_engine)
@@ -42,16 +61,24 @@ async def get_stp_session() -> AsyncGenerator[AsyncSession, None]:
     async with stp_session_pool() as session:
         yield session
 
-
 @asynccontextmanager
 async def get_stats_session() -> AsyncGenerator[AsyncSession, None]:
     """Get Stats database session context manager"""
     async with stats_session_pool() as session:
         yield session
 
-
 @asynccontextmanager
 async def get_questions_session() -> AsyncGenerator[AsyncSession, None]:
     """Get Questions database session context manager"""
     async with questions_session_pool() as session:
+        yield session
+
+@asynccontextmanager
+async def get_backend_session() -> AsyncGenerator[AsyncSession, None]:
+    async with backend_session_pool() as session:
+        yield session
+
+@asynccontextmanager
+async def get_parser_session() -> AsyncGenerator[AsyncSession, None]:
+    async with parser_session_pool() as session:
         yield session

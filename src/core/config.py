@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     DB_USER: str
     DB_PASSWORD: str
 
+    DB_BACKEND_NAME: str
+    DB_PARSER_NAME: str
+
     DB_STP_NAME: str
     DB_STATS_NAME: str
     DB_QUESTIONS_NAME: str

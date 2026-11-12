@@ -5,6 +5,8 @@ from okc_py import OKC
 from okc_py.config import Settings
 from src.core.redis import close_redis
 
+from src.tasks.dynamic_reports import run_dynamic_reports_loop
+
 from src.core.config import settings
 from src.core.ws_bridge import (
     cleanup_ws_bridges,
@@ -223,121 +225,10 @@ async def main():
         )
 
     try:
-        await okc_client.connect()
-
         await parser_event_service.service_started()
-
         parser_started = True
 
-        await setup_ws_bridges(
-            okc_client,
-            lines=[
-                "ntp"
-            ],
-        )
-
-        db_url = (
-            settings.SCHEDULER_JOB_STORE_URL
-            if (
-                settings.SCHEDULER_ENABLE_PERSISTENCE
-                and settings.SCHEDULER_JOB_STORE_URL
-            )
-            else None
-        )
-
-        if db_url:
-            logger.info(
-                "Scheduler persistence "
-                f"enabled with DB: {db_url}"
-            )
-
-        scheduler = Scheduler(
-            okc_client=okc_client,
-            db_url=db_url,
-            max_workers=(
-                settings.SCHEDULER_MAX_WORKERS
-            ),
-        )
-
-        async with scheduler.managed_lifecycle():
-            logger.info(
-                "Планировщик запущен"
-            )
-
-            logger.info(
-                "Dossier bulk sync config: "
-                "mode=%s, "
-                "custom_hours=%s, "
-                "on_startup=%s",
-                settings.DOSSIER_BULK_SYNC_MODE,
-                settings.DOSSIER_BULK_SYNC_HOURS,
-                settings.DOSSIER_BULK_SYNC_ON_STARTUP,
-            )
-
-            status = scheduler.get_job_status()
-
-            logger.info(
-                "Запланированные задачи: %s",
-                len(status["jobs"]),
-            )
-
-            for job in status["jobs"]:
-                logger.info(
-                    "  - %s "
-                    "(ID: %s) - "
-                    "Next run: %s",
-                    job["name"],
-                    job["id"],
-                    job["next_run"],
-                )
-
-            await run_startup_tasks(
-                okc_client,
-                logger,
-            )
-
-            try:
-                while True:
-                    await asyncio.sleep(2)
-
-                    if DASHBOARD_AVAILABLE:
-                        status = (
-                            scheduler.get_job_status()
-                        )
-
-                        update_scheduler_jobs(
-                            status["jobs"],
-                            status[
-                                "scheduler_running"
-                            ],
-                        )
-
-                    if logger.isEnabledFor(
-                        logging.DEBUG
-                    ):
-                        status = (
-                            scheduler.get_job_status()
-                        )
-
-                        logger.debug(
-                            "Scheduler stats: %s",
-                            status["stats"],
-                        )
-
-            except KeyboardInterrupt:
-                logger.info(
-                    "Keyboard interrupt received. "
-                    "Shutting down gracefully..."
-                )
-
-            except Exception as e:
-                logger.error(
-                    "Unexpected error "
-                    f"in main loop: {e}",
-                    exc_info=True,
-                )
-
-                raise
+        await run_dynamic_reports_loop(okc_client)
 
     except Exception as e:
         logger.error(
