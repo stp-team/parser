@@ -350,6 +350,122 @@ def prepare_url(base_url: str, raw_url: str) -> str:
 
     return url
 
+def validate_premium_response(
+    raw_result: str,
+    link: dict[str, Any],
+    requested_period: str,
+) -> tuple[str, int, int]:
+    """
+    Проверяет ответы премиума специалистов и РГ.
+
+    Возвращает:
+        (тип_премиума, количество_строк,
+         количество_notEligible)
+
+    Исходный JSON не изменяет.
+    """
+
+    try:
+        response = json.loads(raw_result)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{link['name']}: премиум вернул невалидный JSON"
+        ) from exc
+
+    # Специалисты: корневой JSON-массив.
+    if isinstance(response, list):
+        premium_type = "specialists"
+        rows = response
+        not_eligible = {}
+
+    # РГ: объект с premium и notEligible.
+    elif (
+        isinstance(response, dict)
+        and isinstance(response.get("premium"), list)
+    ):
+        premium_type = "heads"
+        rows = response["premium"]
+
+        not_eligible = response.get("notEligible", {})
+
+        # OKC иногда возвращает пустой массив.
+        if not_eligible == []:
+            not_eligible = {}
+
+        if not isinstance(not_eligible, dict):
+            raise ValueError(
+                f"{link['name']}: некорректный notEligible"
+            )
+
+    else:
+        raise ValueError(
+            f"{link['name']}: неизвестный формат премиума. "
+            "Ожидался массив специалистов либо "
+            "объект с полем premium"
+        )
+
+    # Контроль соответствия endpoint и ответа.
+    endpoint = link["url"].split("?")[0].rstrip("/")
+
+    if endpoint.endswith("get-premium-head-month"):
+        expected_type = "heads"
+    elif endpoint.endswith("get-premium-spec-month"):
+        expected_type = "specialists"
+    else:
+        raise ValueError(
+            f"{link['name']}: неизвестный endpoint премиума"
+        )
+
+    if premium_type != expected_type:
+        raise ValueError(
+            f"{link['name']}: получен {premium_type}, "
+            f"ожидался {expected_type}"
+        )
+
+    if not rows:
+        raise ValueError(
+            f"{link['name']}: премиум вернул пустой список"
+        )
+
+    # Проверяем реальный месяц каждой строки.
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"{link['name']}: строка {index} "
+                "не является объектом"
+            )
+
+        row_period = row.get("PERIOD")
+
+        try:
+            parsed_period = datetime.strptime(
+                row_period,
+                "%d.%m.%Y",
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{link['name']}: некорректный PERIOD "
+                f"в строке {index}: {row_period}"
+            ) from exc
+
+        if parsed_period.strftime("%m.%Y") != requested_period:
+            raise ValueError(
+                f"{link['name']}: период ответа "
+                f"{row_period} не соответствует "
+                f"запросу {requested_period}"
+            )
+
+        if row.get("EMPLOYEE_ID") is None:
+            raise ValueError(
+                f"{link['name']}: отсутствует EMPLOYEE_ID "
+                f"в строке {index}"
+            )
+
+    return (
+        premium_type,
+        len(rows),
+        len(not_eligible),
+    )
 
 async def fetch_raw_report(
     okc: OKC,
@@ -457,9 +573,31 @@ async def fetch_raw_report(
         if not result:
             raise ValueError("OKC вернул пустой ответ")
 
-        return bytes(result).decode(
+        raw_result = bytes(result).decode(
             response.charset or "utf-8"
         )
+
+        if resource_type == "premium":
+            premium_type, rows_count, excluded_count = (
+                validate_premium_response(
+                    raw_result=raw_result,
+                    link=link,
+                    requested_period=payload["period"],
+                )
+            )
+
+            logger.info(
+                "[PREMIUM] %s | тип=%s | месяц=%s | "
+                "сотрудников=%s | notEligible=%s | OK",
+                link["name"],
+                premium_type,
+                payload["period"],
+                rows_count,
+                excluded_count,
+            )
+
+        return raw_result
+
 
 async def save_report(
     name: str,
