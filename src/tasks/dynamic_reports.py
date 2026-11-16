@@ -349,6 +349,12 @@ async def parser_is_enabled() -> bool:
 
 
 async def collect_reports(okc: OKC) -> None:
+    now = datetime.now(settings.SCHEDULER_TIMEZONE)
+
+    # OKC-отчёты выгружаем не раньше 10:00.
+    if now.hour < 10:
+        return
+
     is_on, links = await read_parser_settings()
 
     if not is_on:
@@ -358,6 +364,10 @@ async def collect_reports(okc: OKC) -> None:
 
     for link in links:
         if not link["enabled"]:
+            continue
+
+        # Месячные отчёты — не раньше 4-го числа.
+        if link["period"] == "m" and now.day < 4:
             continue
 
         start_date, stop_date, label = get_period_dates(
