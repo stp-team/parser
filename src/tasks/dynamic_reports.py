@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -133,6 +133,11 @@ async def read_parser_settings() -> tuple[bool, list[dict[str, Any]]]:
 
         if link["period"] not in {"d", "w", "m"}:
             raise ValueError(f"Некорректный period: {link['name']}")
+        resource_type = link.get("resource_type", "eos")
+
+        if resource_type not in {"eos", "premium", "tutors"}:
+            raise ValueError(f"Некорректный resource_type: {link['name']}")
+        link["resource_type"] = resource_type
 
         if not isinstance(link["payload"], dict):
             raise ValueError(f"Некорректный payload: {link['name']}")
@@ -207,6 +212,94 @@ async def report_exists(
 
         return result.first() is not None
 
+# Для premium/tutors хранится одна актуальная
+# запись на каждый link_name.
+REFRESH_LABEL = "__latest__"
+
+async def get_last_refresh(
+    name: str,
+) -> datetime | None:
+    """Последняя успешная выгрузка источника."""
+
+    async with get_stats_session() as session:
+        result = await session.execute(
+            text("""
+                SELECT writed_at
+                FROM `ParserReports`
+                WHERE link_name = :name
+                  AND period_of_dates = :label
+                ORDER BY writed_at DESC
+                LIMIT 1
+            """),
+            {
+                "name": name,
+                "label": REFRESH_LABEL,
+            },
+        )
+
+        return result.scalar_one_or_none()
+
+
+def refresh_is_due(
+    period: str,
+    last_refresh: datetime | None,
+    now: datetime,
+) -> bool:
+    """Нужно ли обновить premium/tutors."""
+
+    # Общий запрет выгрузки раньше 10:00.
+    if now.hour < 10:
+        return False
+
+    # Месячные обновления начинаются
+    # с 4-го числа, как в прежнем расписании.
+    if period == "m" and now.day < 4:
+        return False
+
+    # Источник ещё никогда не выгружался.
+    if last_refresh is None:
+        return True
+
+    # Новые записи хранят writed_at в UTC.
+    # MySQL DATETIME не содержит часовой пояс.
+    if last_refresh.tzinfo is None:
+        last_refresh = last_refresh.replace(
+            tzinfo=timezone.utc
+        )
+
+    last_date = last_refresh.astimezone(
+        settings.SCHEDULER_TIMEZONE
+    ).date()
+
+    today = now.date()
+
+    if period == "d":
+        # Одно успешное обновление за день.
+        return last_date < today
+
+    if period == "w":
+        # Одно обновление за календарную
+        # неделю, начиная с понедельника.
+        week_start = today - timedelta(
+            days=today.weekday()
+        )
+
+        return last_date < week_start
+
+    if period == "m":
+        # Одно обновление за календарный месяц.
+        return (
+            last_date.year,
+            last_date.month,
+        ) < (
+            today.year,
+            today.month,
+        )
+
+    raise ValueError(
+        f"Неизвестная периодичность: {period}"
+    )
+
 def prepare_url(base_url: str, raw_url: str) -> str:
     """Разрешает запросы только к настроенному серверу OKC."""
 
@@ -239,10 +332,10 @@ def prepare_url(base_url: str, raw_url: str) -> str:
 async def fetch_raw_report(
     okc: OKC,
     link: dict[str, Any],
-    start_date: str,
-    stop_date: str,
+    start_date: str | None = None,
+    stop_date: str | None = None,
 ) -> str:
-    """Отправляет POST JSON и возвращает исходный ответ."""
+    """POST JSON в OKC, получение сырого ответа."""
 
     url = prepare_url(
         okc.client.settings.BASE_URL,
@@ -250,8 +343,25 @@ async def fetch_raw_report(
     )
 
     payload = dict(link["payload"])
-    payload["startDate"] = start_date
-    payload["stopDate"] = stop_date
+
+    resource_type = link.get(
+        "resource_type",
+        "eos",
+    )
+
+    if resource_type == "eos":
+        # Только для eos period определяет
+        # даты запрашиваемого отчёта.
+        if start_date is None or stop_date is None:
+            raise ValueError(
+                "Для eos необходимы startDate и stopDate"
+            )
+
+        payload["startDate"] = start_date
+        payload["stopDate"] = stop_date
+
+    # Для premium/tutors payload не меняем.
+    # Все параметры передаются из parser.links.
 
     session = okc.client.get_session()
 
@@ -334,6 +444,98 @@ async def save_report(
 
         await session.commit()
 
+async def save_refresh_report(
+    name: str,
+    period: str,
+    raw_result: str,
+) -> None:
+    """
+    Сохраняет актуальный premium/tutors отчёт.
+
+    При первом получении создаёт строку.
+    При последующих — обновляет её,
+    сохраняя прежний UUID.
+    """
+
+    async with get_stats_session() as session:
+        async with session.begin():
+
+            result = await session.execute(
+                text("""
+                    SELECT uuid
+                    FROM `ParserReports`
+                    WHERE link_name = :name
+                      AND period_of_dates = :label
+                    ORDER BY writed_at DESC
+                    LIMIT 1
+                    FOR UPDATE
+                """),
+                {
+                    "name": name,
+                    "label": REFRESH_LABEL,
+                },
+            )
+
+            report_uuid = result.scalar_one_or_none()
+
+            if report_uuid is None:
+                # Первая успешная выгрузка.
+                await session.execute(
+                    text("""
+                        INSERT INTO `ParserReports` (
+                            uuid,
+                            link_name,
+                            period_type,
+                            period_of_dates,
+                            link_result,
+                            writed_at,
+                            checked_at,
+                            check_status,
+                            check_result
+                        )
+                        VALUES (
+                            :uuid,
+                            :name,
+                            :period,
+                            :label,
+                            :raw_result,
+                            UTC_TIMESTAMP(),
+                            NULL,
+                            'ready',
+                            NULL
+                        )
+                    """),
+                    {
+                        "uuid": str(uuid4()),
+                        "name": name,
+                        "period": period,
+                        "label": REFRESH_LABEL,
+                        "raw_result": raw_result,
+                    },
+                )
+
+            else:
+                # Последующие выгрузки обновляют
+                # существующую строку.
+                await session.execute(
+                    text("""
+                        UPDATE `ParserReports`
+                        SET
+                            period_type = :period,
+                            link_result = :raw_result,
+                            writed_at = UTC_TIMESTAMP(),
+                            checked_at = NULL,
+                            check_status = 'ready',
+                            check_result = NULL
+                        WHERE uuid = :uuid
+                    """),
+                    {
+                        "uuid": report_uuid,
+                        "period": period,
+                        "raw_result": raw_result,
+                    },
+                )
+
 async def parser_is_enabled() -> bool:
     """Перепроверяет выключатель между запросами."""
 
@@ -347,11 +549,14 @@ async def parser_is_enabled() -> bool:
         and str(flag.value).strip() == "1"
     )
 
-
 async def collect_reports(okc: OKC) -> None:
-    now = datetime.now(settings.SCHEDULER_TIMEZONE)
+    """Универсальная выгрузка eos/premium/tutors."""
 
-    # OKC-отчёты выгружаем не раньше 10:00.
+    now = datetime.now(
+        settings.SCHEDULER_TIMEZONE
+    )
+
+    # Сохраняем действующее ограничение.
     if now.hour < 10:
         return
 
@@ -366,22 +571,59 @@ async def collect_reports(okc: OKC) -> None:
         if not link["enabled"]:
             continue
 
-        # Месячные отчёты — не раньше 4-го числа.
-        if link["period"] == "m" and now.day < 4:
-            continue
+        resource_type = link["resource_type"]
+        period = link["period"]
 
-        start_date, stop_date, label = get_period_dates(
-            link["period"]
+        if resource_type == "eos":
+            # Старое поведение eos:
+            # period определяет даты отчёта.
+
+            if period == "m" and now.day < 4:
+                continue
+
+            start_date, stop_date, label = (
+                get_period_dates(period)
+            )
+
+            # Уже сохранённый период
+            # повторно не скачиваем.
+            if await report_exists(
+                link["name"],
+                period,
+                label,
+            ):
+                continue
+
+        else:
+            # premium/tutors:
+            # period определяет частоту
+            # обновления данных.
+
+            last_refresh = await get_last_refresh(
+                link["name"]
+            )
+
+            if not refresh_is_due(
+                period,
+                last_refresh,
+                now,
+            ):
+                continue
+
+            # Даты автоматически не формируем.
+            start_date = None
+            stop_date = None
+
+            label = REFRESH_LABEL
+
+        pending.append(
+            (
+                link,
+                start_date,
+                stop_date,
+                label,
+            )
         )
-
-        if await report_exists(
-            link["name"],
-            link["period"],
-            label,
-        ):
-            continue
-
-        pending.append((link, start_date, stop_date, label))
 
     if not pending:
         return
@@ -392,11 +634,23 @@ async def collect_reports(okc: OKC) -> None:
     try:
         await okc.connect()
 
-        for link, start_date, stop_date, label in pending:
+        for (
+            link,
+            start_date,
+            stop_date,
+            label,
+        ) in pending:
+
             if not await parser_is_enabled():
+                logger.info(
+                    "Парсер выключен во время прогона"
+                )
                 break
 
+            resource_type = link["resource_type"]
+
             try:
+                # Всегда POST.
                 raw_result = await fetch_raw_report(
                     okc,
                     link,
@@ -404,41 +658,77 @@ async def collect_reports(okc: OKC) -> None:
                     stop_date,
                 )
 
-                await save_report(
-                    link["name"],
-                    link["period"],
-                    label,
-                    raw_result,
-                )
+                if resource_type == "eos":
+                    # Отдельная историческая запись
+                    # для каждого отчётного периода.
+                    await save_report(
+                        link["name"],
+                        link["period"],
+                        label,
+                        raw_result,
+                    )
+
+                else:
+                    # premium/tutors:
+                    # обновление существующей записи.
+                    await save_refresh_report(
+                        link["name"],
+                        link["period"],
+                        raw_result,
+                    )
 
                 successful += 1
+
+                logger.info(
+                    "[PARSER] %s | type=%s | "
+                    "period=%s | сохранено",
+                    link["name"],
+                    resource_type,
+                    link["period"],
+                )
+
+            except asyncio.CancelledError:
+                raise
 
             except Exception as exc:
                 failed += 1
 
                 logger.warning(
-                    "Ошибка выгрузки %s: %s",
+                    "[PARSER] Ошибка %s (%s): %s",
                     link["name"],
+                    resource_type,
                     exc,
                 )
 
                 await write_parser_log(
                     "warn",
-                    f"{link['name']} [{label}]: "
-                    f"{type(exc).__name__}: {exc}",
+                    (
+                        f"{link['name']} "
+                        f"[{resource_type}, {label}]: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
                 )
 
     finally:
         await okc.close()
 
-    await write_parser_log(
-        "info",
-        f"Прогон завершён. "
-        f"Запланировано: {len(pending)}; "
-        f"успешно: {successful}; "
-        f"ошибок: {failed}.",
+    logger.info(
+        "[PARSER] Прогон завершён | "
+        "источников=%s | успешно=%s | ошибок=%s",
+        len(pending),
+        successful,
+        failed,
     )
 
+    await write_parser_log(
+        "info",
+        (
+            f"Прогон завершён. "
+            f"Запланировано: {len(pending)}; "
+            f"успешно: {successful}; "
+            f"ошибок: {failed}."
+        ),
+    )
 
 async def run_dynamic_reports_loop(okc: OKC) -> None:
     """Основной цикл управляемого парсера."""
