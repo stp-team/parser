@@ -300,6 +300,28 @@ def refresh_is_due(
         f"Неизвестная периодичность: {period}"
     )
 
+def get_premium_period(now: datetime) -> str:
+    """
+    Возвращает месяц премиума в формате MM.YYYY.
+
+    С 1 по 3 число:
+        предыдущий календарный месяц.
+
+    С 4 числа:
+        текущий календарный месяц.
+    """
+
+    month_start = now.date().replace(day=1)
+
+    if now.day < 4:
+        target_month = (
+            month_start - timedelta(days=1)
+        )
+    else:
+        target_month = month_start
+
+    return target_month.strftime("%m.%Y")
+
 def prepare_url(base_url: str, raw_url: str) -> str:
     """Разрешает запросы только к настроенному серверу OKC."""
 
@@ -350,8 +372,8 @@ async def fetch_raw_report(
     )
 
     if resource_type == "eos":
-        # Только для eos period определяет
-        # даты запрашиваемого отчёта.
+        # Прежнее поведение:
+        # period отвечает за даты отчёта.
         if start_date is None or stop_date is None:
             raise ValueError(
                 "Для eos необходимы startDate и stopDate"
@@ -359,6 +381,38 @@ async def fetch_raw_report(
 
         payload["startDate"] = start_date
         payload["stopDate"] = stop_date
+
+    elif resource_type == "premium":
+        # period в parser.links отвечает
+        # только за частоту опроса.
+        #
+        # payload.period — месяц премиума.
+        # Формат: MM.YYYY.
+        now = datetime.now(
+            settings.SCHEDULER_TIMEZONE
+        )
+
+        premium_period = get_premium_period(now)
+
+        payload["period"] = premium_period
+
+        logger.info(
+            "[PREMIUM] %s | "
+            "месяц=%s | частота=%s",
+            link["name"],
+            premium_period,
+            link["period"],
+        )
+
+    elif resource_type == "tutors":
+        # Для наставников ничего автоматически
+        # в payload не добавляем.
+        pass
+
+    else:
+        raise ValueError(
+            f"Неизвестный resource_type: {resource_type}"
+        )
 
     # Для premium/tutors payload не меняем.
     # Все параметры передаются из parser.links.
