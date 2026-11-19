@@ -372,7 +372,6 @@ class CLIDashboard:
 
         label = Text()
         label.append("STP PARSER", style="bold cyan")
-        label.append("  |  ", style="dim")
         label.append(
             "RUNNING" if state["enabled"] else "PAUSED",
             style="green" if state["enabled"] else "yellow",
@@ -400,7 +399,10 @@ class CLIDashboard:
         )
 
         label.append(
-            f"  |  БД: {db_state}",
+            "  |  "
+        )
+        label.append(
+            f"БД: {db_state}",
             style=(
                 "green"
                 if db_state == "OK"
@@ -412,7 +414,10 @@ class CLIDashboard:
         okc_status = state["okc_status"]
 
         label.append(
-            f"  |  OKC: {okc_status}",
+            f"  |  "
+        )
+        label.append(
+            f"OKC: {okc_status}",
             style=(
                 "green"
                 if okc_status == "OK"
@@ -421,7 +426,10 @@ class CLIDashboard:
         )
 
         label.append(
-            f"  |  WS НТП: {ws}",
+            f"  |  "
+        )
+        label.append(
+            f"WS НТП: {ws}",
             style="green" if ws == "ONLINE" else "yellow",
         )
 
