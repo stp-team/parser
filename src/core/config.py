@@ -116,6 +116,10 @@ class Settings(BaseSettings):
         "normal",
         "debug",
     ] = "normal"
+    
+    # Навигация по таблице отчётов.
+    PARSER_AUTO_PAGE: bool = False
+    PARSER_PAGE_INTERVAL: int = 12
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

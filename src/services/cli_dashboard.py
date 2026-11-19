@@ -1,6 +1,6 @@
-
 """Терминальный мониторинг STP Parser."""
 
+import sys
 import logging
 import os
 import queue
@@ -43,6 +43,181 @@ class LogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
+class NavigationInput:
+    """Неблокирующий ввод для Rich Dashboard."""
+
+    def __init__(self):
+        self._fd = None
+        self._buffer = b""
+        self._old_terminal = None
+        self._termios = None
+
+    def start(self):
+        try:
+            self._fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            return
+
+        if os.name == "nt":
+            # Windows: msvcrt используется
+            # непосредственно при опросе.
+            return
+
+        if not sys.stdin.isatty():
+            return
+
+        try:
+            import termios
+            import tty
+
+            self._old_terminal = (
+                termios.tcgetattr(self._fd)
+            )
+            self._termios = termios
+
+            # Без ожидания Enter, без эха символов.
+            # Ctrl+C остаётся доступным.
+            tty.setcbreak(self._fd)
+
+        except (OSError, ValueError):
+            self._old_terminal = None
+            self._termios = None
+
+    def stop(self):
+        if (
+            self._termios is not None
+            and self._old_terminal is not None
+            and self._fd is not None
+        ):
+            self._termios.tcsetattr(
+                self._fd,
+                self._termios.TCSADRAIN,
+                self._old_terminal,
+            )
+
+        self._old_terminal = None
+        self._termios = None
+
+    def read(self) -> list[str]:
+        commands = []
+
+        if self._fd is None:
+            return commands
+
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                while msvcrt.kbhit():
+                    char = msvcrt.getwch()
+
+                    # Специальные клавиши Windows.
+                    if char in ("\x00", "\xe0"):
+                        special = msvcrt.getwch()
+
+                        if special == "K":
+                            commands.append("prev")
+                        elif special == "M":
+                            commands.append("next")
+
+                    else:
+                        self._buffer += char.encode(
+                            "utf-8",
+                            errors="ignore",
+                        )
+
+            except OSError:
+                pass
+
+            # Дополнительная поддержка терминалов,
+            # где stdin предоставлен как pipe.
+            # Например, некоторых конфигураций
+            # Git Bash / MinGW.
+            try:
+                import ctypes
+
+                handle = msvcrt.get_osfhandle(
+                    self._fd
+                )
+
+                available = ctypes.c_ulong(0)
+
+                success = (
+                    ctypes.windll.kernel32.PeekNamedPipe(
+                        ctypes.c_void_p(handle),
+                        None,
+                        0,
+                        None,
+                        ctypes.byref(available),
+                        None,
+                    )
+                )
+
+                if success and available.value:
+                    self._buffer += os.read(
+                        self._fd,
+                        min(available.value, 128),
+                    )
+
+            except (OSError, ValueError, AttributeError):
+                pass
+
+        else:
+            import select
+
+            try:
+                readable, _, _ = select.select(
+                    [self._fd],
+                    [],
+                    [],
+                    0,
+                )
+
+                if readable:
+                    self._buffer += os.read(
+                        self._fd,
+                        128,
+                    )
+
+            except (OSError, ValueError):
+                pass
+
+        while self._buffer:
+            # Последовательности стрелок ANSI:
+            # ESC [ D = влево
+            # ESC [ C = вправо
+            if self._buffer[0] == 27:
+                if len(self._buffer) < 3:
+                    break
+
+                sequence = self._buffer[:3]
+                self._buffer = self._buffer[3:]
+
+                if sequence in (
+                    b"\x1b[D",
+                    b"\x1bOD",
+                ):
+                    commands.append("prev")
+
+                elif sequence in (
+                    b"\x1b[C",
+                    b"\x1bOC",
+                ):
+                    commands.append("next")
+
+                continue
+
+            char = chr(self._buffer[0]).lower()
+            self._buffer = self._buffer[1:]
+
+            if char == "p":
+                commands.append("prev")
+            elif char == "n":
+                commands.append("next")
+            elif char == "a":
+                commands.append("toggle_auto")
+
+        return commands
 
 class CLIDashboard:
     def __init__(self, refresh_per_second=2):
@@ -55,6 +230,17 @@ class CLIDashboard:
         self._running = False
         self._live = None
         self._update_thread = None
+        self._page_index = 0
+        self._auto_page = settings.PARSER_AUTO_PAGE
+
+        self._page_interval = max(
+            3,
+            settings.PARSER_PAGE_INTERVAL,
+        )
+
+        self._last_page_change = time.monotonic()
+
+        self._navigation = NavigationInput()
 
     def get_log_handler(self):
         return LogHandler(self.log_queue)
@@ -204,31 +390,35 @@ class CLIDashboard:
                 style="bold yellow",
             )
 
-            db_state = (
-                "OK"
-                if state["db_ok"] is True
-                else "ERR"
-                if state["db_ok"] is False
-                else "—"
-            )
+        # Состояние БД показываем всегда.
+        db_state = (
+            "OK"
+            if state["db_ok"] is True
+            else "ERR"
+            if state["db_ok"] is False
+            else "—"
+        )
 
-            label.append(
-                f"  |  БД: {db_state}",
-                style=(
-                    "green"
-                    if db_state == "OK"
-                    else "yellow"
-                ),
-            )
+        label.append(
+            f"  |  БД: {db_state}",
+            style=(
+                "green"
+                if db_state == "OK"
+                else "yellow"
+            ),
+        )
 
-            label.append(
-                f"  |  OKC: {state['okc_status']}",
-                style=(
-                    "green"
-                    if state["okc_status"] == "OK"
-                    else "yellow"
-                ),
-            )
+        # Последнее известное состояние запросов OKC.
+        okc_status = state["okc_status"]
+
+        label.append(
+            f"  |  OKC: {okc_status}",
+            style=(
+                "green"
+                if okc_status == "OK"
+                else "yellow"
+            ),
+        )
 
         label.append(
             f"  |  WS НТП: {ws}",
@@ -246,32 +436,165 @@ class CLIDashboard:
             padding=(0, 1),
         )
 
+    def _handle_navigation(self, total_pages: int):
+        """Ручная/автоматическая смена страниц."""
+
+        total_pages = max(1, total_pages)
+
+        self._page_index %= total_pages
+
+        now = time.monotonic()
+
+        for command in self._navigation.read():
+            if command == "prev":
+                self._page_index = (
+                                           self._page_index - 1
+                                   ) % total_pages
+
+                self._last_page_change = now
+
+            elif command == "next":
+                self._page_index = (
+                                           self._page_index + 1
+                                   ) % total_pages
+
+                self._last_page_change = now
+
+            elif command == "toggle_auto":
+                self._auto_page = not self._auto_page
+                self._last_page_change = now
+
+        if (
+                self._auto_page
+                and total_pages > 1
+                and now - self._last_page_change
+                >= self._page_interval
+        ):
+            self._page_index = (
+                                       self._page_index + 1
+                               ) % total_pages
+
+            self._last_page_change = now
+
+    @staticmethod
+    def _report_status(item, state, now):
+        """Определить понятный статус источника."""
+
+        if not state["enabled"] or not item["enabled"]:
+            return "ВЫКЛ.", "dim", "disabled"
+
+        if item["last_status"] == "ERROR":
+            return "ОШИБКА", "bold red", "error"
+
+        next_run = next_report_run(item, now)
+
+        due = (
+                next_run is not None
+                and next_run <= now.replace(tzinfo=None)
+        )
+
+        # Время планового опроса уже наступило,
+        # но успешной выгрузки за текущий цикл нет.
+        if due:
+            return "ОЖИДАНИЕ", "yellow", "waiting"
+
+        last_success = item.get("last_success")
+
+        if last_success == now.date().isoformat():
+            return "УСПЕШНО", "green", "success"
+
+        if last_success:
+            return "ПО ПЛАНУ", "green", "scheduled"
+
+        return "НЕТ ДАННЫХ", "dim", "empty"
+
     def _reports_panel(self, state, visible_rows):
-        reports = list(state["reports"])
+        """Группировка отчётов с ручной пагинацией."""
 
-        reports.sort(
-            key=lambda item: (
-                item["last_status"] != "ERROR",
-                not item["enabled"],
-                item["description"].casefold(),
+        now = datetime.now(
+            settings.SCHEDULER_TIMEZONE
+        )
+
+        group_titles = {
+            "eos": "ЕОС",
+            "premium": "ПРЕМИУМ",
+            "tutors": "НАСТАВНИКИ",
+        }
+
+        # Каждый тип отчёта получает свой раздел.
+        groups = {
+            "eos": [],
+            "premium": [],
+            "tutors": [],
+        }
+
+        for item in state["reports"]:
+            kind = item.get(
+                "resource_type", "eos"
             )
-        )
 
-        total = len(reports)
-        page_count = max(
-            1,
-            ceil(total / visible_rows),
-        )
+            groups.setdefault(kind, []).append(item)
 
-        # Автопереключение страницы раз в 12 секунд.
-        page = int(
-            time.monotonic() // 12
-        ) % page_count
+        status_priority = {
+            "error": 0,
+            "waiting": 1,
+            "success": 2,
+            "scheduled": 3,
+            "empty": 4,
+            "disabled": 5,
+        }
 
-        offset = page * visible_rows
-        current = reports[
-            offset:offset + visible_rows
-        ]
+        # Внутри раздела сначала проблемные
+        # источники, затем остальные по названию.
+        for items in groups.values():
+            items.sort(
+                key=lambda item: (
+                    status_priority.get(
+                        self._report_status(
+                            item, state, now
+                        )[2],
+                        99,
+                    ),
+                    item["description"].casefold(),
+                )
+            )
+
+        pages = []
+        page_capacity = max(1, visible_rows)
+
+        for kind, items in groups.items():
+            if not items:
+                continue
+
+            group_pages = ceil(
+                len(items) / page_capacity
+            )
+
+            for local_page in range(group_pages):
+                start = local_page * page_capacity
+                end = start + page_capacity
+
+                pages.append({
+                    "kind": kind,
+                    "group_total": len(items),
+                    "group_page": local_page + 1,
+                    "group_pages": group_pages,
+                    "items": items[start:end],
+                })
+
+        if not pages:
+            pages = [{
+                "kind": "eos",
+                "group_total": 0,
+                "group_page": 1,
+                "group_pages": 1,
+                "items": [],
+            }]
+
+        # Читаем стрелки и обрабатываем автопрокрутку.
+        self._handle_navigation(len(pages))
+
+        page = pages[self._page_index]
 
         table = Table(
             box=box.SIMPLE_HEAD,
@@ -287,55 +610,39 @@ class CLIDashboard:
             overflow="ellipsis",
             no_wrap=True,
         )
+
         table.add_column(
             "Последняя",
             justify="center",
             width=11,
         )
+
         table.add_column(
             "OK",
             justify="right",
             width=5,
             style="green",
         )
+
         table.add_column(
             "ERR",
             justify="right",
             width=5,
             style="yellow",
         )
+
         table.add_column(
             "Статус",
             justify="center",
-            width=10,
+            width=12,
         )
 
-        for item in current:
-            if not item["enabled"]:
-                status = Text(
-                    "ВЫКЛ.",
-                    style="dim",
+        for item in page["items"]:
+            status_text, status_style, _ = (
+                self._report_status(
+                    item, state, now
                 )
-            elif item["last_status"] == "ERROR":
-                status = Text(
-                    "ОШИБКА",
-                    style="bold red",
-                )
-            elif item["last_status"] == "OK":
-                status = Text(
-                    "УСПЕШНО",
-                    style="green",
-                )
-            elif item["last_success"]:
-                status = Text(
-                    "ОЖИД.",
-                    style="yellow",
-                )
-            else:
-                status = Text(
-                    "НЕТ ДАННЫХ",
-                    style="dim",
-                )
+            )
 
             table.add_row(
                 Text(
@@ -349,19 +656,35 @@ class CLIDashboard:
                 ),
                 str(item["ok"]),
                 str(item["errors"]),
-                status,
+                Text(
+                    status_text,
+                    style=status_style,
+                ),
             )
 
-        if not current:
+        if not page["items"]:
             table.add_row(
                 "Нет настроенных отчётов",
                 "—", "0", "0", "—",
             )
 
+        group_title = group_titles.get(
+            page["kind"],
+            page["kind"].upper(),
+        )
+
+        mode = (
+            "АВТО"
+            if self._auto_page
+            else "РУЧНОЙ"
+        )
+
         title = (
-            f"Отчёты OKC  "
-            f"[{total} источников · "
-            f"страница {page + 1}/{page_count}]"
+            f"Отчёты OKC · {group_title} "
+            f"({page['group_total']})"
+            f" · {self._page_index + 1}/{len(pages)}"
+            f" · {mode}"
+            f" · ←/→ страницы, A авто"
         )
 
         return Panel(
@@ -415,6 +738,18 @@ class CLIDashboard:
         )
 
     def _next_panel(self, state, compact=False):
+        if not state["enabled"]:
+            return Panel(
+                Text(
+                    "Парсер выключен — "
+                    "выгрузки приостановлены",
+                    style="yellow",
+                ),
+                title="Ближайшие выгрузки",
+                border_style="bright_black",
+                padding=(0, 1),
+            )
+
         now = datetime.now(
             settings.SCHEDULER_TIMEZONE
         )
@@ -614,6 +949,7 @@ class CLIDashboard:
 
         try:
             self._live.start()
+            self._navigation.start()
         except Exception:
             self._running = False
             raise
@@ -633,8 +969,11 @@ class CLIDashboard:
         if self._update_thread:
             self._update_thread.join(timeout=2)
 
-        if self._live:
-            self._live.stop()
+        try:
+            if self._live:
+                self._live.stop()
+        finally:
+            self._navigation.stop()
 
     def __enter__(self):
         self.start()
