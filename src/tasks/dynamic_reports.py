@@ -1,15 +1,17 @@
-
 import asyncio
 import json
 import logging
+
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from src.services.monitor_state import monitor
+
 from aiohttp import ClientTimeout
 from okc_py import OKC
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from stp_database.repo.Backend.requests import BackendRequestsRepo
 
 from src.core.config import settings
@@ -87,8 +89,9 @@ async def read_parser_settings() -> tuple[bool, list[dict[str, Any]]]:
         if flag.type != "int" or str(flag.value).strip() not in {"0", "1"}:
             raise ValueError("parser.on должен быть int со значением 0 или 1")
 
-        if str(flag.value).strip() == "0":
-            return False, []
+        parser_enabled = (
+                str(flag.value).strip() == "1"
+        )
 
         links_param = await repo.get_param(
             service="parser",
@@ -145,7 +148,47 @@ async def read_parser_settings() -> tuple[bool, list[dict[str, Any]]]:
         if type(link["enabled"]) is not bool:
             raise ValueError(f"Некорректный enabled: {link['name']}")
 
-    return True, links
+    return parser_enabled, links
+
+async def load_monitor_history(
+    names: list[str],
+) -> None:
+    """Последняя успешная выгрузка каждого источника."""
+
+    if not names:
+        return
+
+    query = text("""
+        SELECT
+            link_name,
+            MAX(writed_at) AS last_at
+        FROM ParserReports
+        WHERE link_name IN :names
+        GROUP BY link_name
+    """).bindparams(
+        bindparam("names", expanding=True)
+    )
+
+    try:
+        async with get_stats_session() as session:
+            result = await session.execute(
+                query,
+                {"names": names},
+            )
+
+            rows = [
+                dict(row)
+                for row in result.mappings()
+            ]
+
+        monitor.set_history(names, rows)
+
+    except Exception:
+        monitor.db_error()
+        logger.exception(
+            "[MONITOR] Не удалось получить "
+            "историю выгрузок"
+        )
 
 async def write_parser_log(
     level: str,
@@ -748,13 +791,20 @@ async def collect_reports(okc: OKC) -> None:
         settings.SCHEDULER_TIMEZONE
     )
 
-    # Сохраняем действующее ограничение.
-    if now.hour < 10:
-        return
-
     is_on, links = await read_parser_settings()
 
-    if not is_on:
+    # Интерфейс обновляется независимо от того,
+    # разрешены ли запросы к OKC прямо сейчас.
+    history_names = monitor.set_links(
+        links,
+        enabled=is_on,
+    )
+
+    if history_names:
+        await load_monitor_history(history_names)
+
+    # Сам механизм получения отчётов не меняем.
+    if not is_on or now.hour < 10:
         return
 
     pending = []
@@ -871,6 +921,10 @@ async def collect_reports(okc: OKC) -> None:
 
                 successful += 1
 
+                monitor.report_success(
+                    link["name"]
+                )
+
                 logger.info(
                     "[PARSER] %s | type=%s | "
                     "period=%s | сохранено",
@@ -884,6 +938,11 @@ async def collect_reports(okc: OKC) -> None:
 
             except Exception as exc:
                 failed += 1
+
+                monitor.report_error(
+                    link["name"],
+                    exc,
+                )
 
                 logger.warning(
                     "[PARSER] Ошибка %s (%s): %s",

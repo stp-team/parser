@@ -7,6 +7,7 @@ import re
 import json
 from typing import Any
 
+from src.services.monitor_state import monitor
 from okc_py import OKC
 from stp_redis import (
     NotificationEvent,
@@ -117,7 +118,9 @@ class WebSocketBridge:
                     self.line_name,
                 )
 
+                monitor.ws_connecting()
                 await self.line.connect()
+                monitor.ws_connected()
 
                 logger.info(
                     "[%s] OKC WebSocket connected",
@@ -138,14 +141,24 @@ class WebSocketBridge:
                     self.line_name,
                 )
 
+                monitor.ws_disconnected(
+                    "Соединение закрыто"
+                )
+
             except asyncio.CancelledError:
                 logger.info(
                     "[%s] WebSocket bridge cancelled",
                     self.line_name,
                 )
+                monitor.ws_disconnected(
+                    "Задача остановлена"
+                )
                 raise
 
             except Exception as e:
+                monitor.ws_disconnected(
+                    f"{type(e).__name__}: {e}"
+                )
                 logger.error(
                     "[%s] WebSocket error: %s",
                     self.line_name,
@@ -463,26 +476,17 @@ class WebSocketBridge:
 
         event = NotificationEvent(
             event_type="okc.line.message",
-
             event_service=NotificationServiceInfo(
                 title="okc_service",
             ),
-
-            channels_type=[
-                "ws",
-                "fcm",
-            ],
-
+            channels_type=["ws", "fcm"],
             title=f"{self.line_title} • {author_name}",
-
             body=message_text,
-
             payload={
                 "line": self.line_name,
                 "from": source,
                 "authorName": author_name,
             },
-
             recipients=NotificationRecipients(
                 include_ids=(
                     OKC_NOTIFICATION_RECIPIENT_IDS
@@ -502,6 +506,8 @@ class WebSocketBridge:
                 approximate=True,
             )
 
+            monitor.ws_published()
+
             logger.info(
                 "[%s] OKC message published: "
                 "notification_id=%s "
@@ -516,6 +522,7 @@ class WebSocketBridge:
         except Exception as e:
             # Redis/notificator не должен ронять
             # WebSocket OKC.
+            monitor.ws_publish_error()
             logger.error(
                 "[%s] Failed to publish "
                 "OKC notification: %s",
@@ -528,7 +535,10 @@ class WebSocketBridge:
         """Остановить WebSocket bridge."""
 
         self.is_running = False
-
+        monitor.ws_disconnected(
+            "WebSocket остановлен"
+        )
+        
         if self.line:
             try:
                 await self.line.disconnect()

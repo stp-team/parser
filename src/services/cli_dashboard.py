@@ -1,10 +1,17 @@
+
+"""Терминальный мониторинг STP Parser."""
+
 import logging
+import os
 import queue
 import threading
 import time
+import traceback
+from collections import deque
 from datetime import datetime
+from math import ceil
 
-from rich.columns import Columns
+from rich import box
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
@@ -12,328 +19,622 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from src.services.api_tracker import api_tracker, db_tracker
+from src.core.config import settings
+from src.services.monitor_schedule import next_report_run
+from src.services.monitor_state import monitor
 
-try:
-    from src.services.scheduler_tracker import get_scheduler_tracker
 
-    SCHEDULER_TRACKER_AVAILABLE = True
-except ImportError:
-    SCHEDULER_TRACKER_AVAILABLE = False
-
+LOG_MODE = settings.PARSER_LOG_MODE
 
 class LogHandler(logging.Handler):
-    def __init__(self, log_queue: queue.Queue):
+    """Передаёт записи logging в очередь Rich."""
+
+    def __init__(self, log_queue):
         super().__init__()
         self.log_queue = log_queue
 
-    def emit(self, record: logging.LogRecord) -> None:
+    def emit(self, record):
         try:
-            self.log_queue.put(record)
+            self.log_queue.put_nowait(record)
+        except queue.Full:
+            # Переполненный экранный буфер
+            # не должен тормозить парсер.
+            pass
         except Exception:
             self.handleError(record)
 
 
 class CLIDashboard:
-    def __init__(self, refresh_per_second: int = 2):
+    def __init__(self, refresh_per_second=2):
         self.console = Console()
-        self.log_queue: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1000)
-        self.log_messages: list[Text] = []
-        self.max_logs = 1000
         self.refresh_per_second = refresh_per_second
-        self._running = False
-        self._live: Live | None = None
-        self._update_thread: threading.Thread | None = None
 
-    def get_log_handler(self) -> logging.Handler:
+        self.log_queue = queue.Queue(maxsize=1000)
+        self.log_messages = deque(maxlen=1000)
+
+        self._running = False
+        self._live = None
+        self._update_thread = None
+
+    def get_log_handler(self):
         return LogHandler(self.log_queue)
 
-    def _process_logs(self) -> None:
-        while not self.log_queue.empty():
-            try:
-                record = self.log_queue.get_nowait()
-                self.log_messages.append(self._format_log_record(record))
-                if len(self.log_messages) > self.max_logs:
-                    self.log_messages.pop(0)
-            except queue.Empty:
-                break
+    @staticmethod
+    def _visible(record):
+        if LOG_MODE == "debug":
+            return True
 
-    def _format_log_record(self, record: logging.LogRecord) -> Text:
-        timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
-        level = record.levelname
-        name = record.name.split(".")[-1]
+        if record.levelno >= logging.WARNING:
+            return True
+
         message = record.getMessage()
+        name = record.name
 
-        level_colors = {
-            "DEBUG": "dim white",
-            "INFO": "bright_blue",
-            "WARNING": "bright_yellow",
+        if name.endswith("dynamic_reports"):
+            if "[PARSER] Прогон завершён" in message:
+                return True
+
+            if LOG_MODE == "normal":
+                return (
+                    "[PARSER]" in message
+                    or "[PREMIUM]" in message
+                )
+
+        if name.endswith("ws_bridge"):
+            important = (
+                "OKC WebSocket connected",
+                "OKC WebSocket disconnected",
+                "OKC message published",
+                "WebSocket bridge stopped",
+            )
+            return any(x in message for x in important)
+
+        if name == "__main__" or name.endswith(".main"):
+            return "WebSocket-мониторинг НТП" in message
+
+        return False
+
+    @staticmethod
+    def _format_record(record):
+        timestamp = datetime.fromtimestamp(
+            record.created,
+            settings.SCHEDULER_TIMEZONE,
+        ).strftime("%H:%M:%S")
+
+        level = record.levelname
+
+        styles = {
+            "DEBUG": "dim",
+            "INFO": "cyan",
+            "WARNING": "yellow",
             "ERROR": "bright_red",
             "CRITICAL": "bold red",
         }
-        level_style = level_colors.get(level, "white")
 
-        text = Text()
-        text.append(f"[{timestamp}] ", style="dim")
-        text.append(f"{level:8}", style=level_style)
-        text.append(f" [{name}] ", style="dim")
-        text.append(message)
-
-        return text
-
-    @staticmethod
-    def _format_job_name(name: str) -> str:
-        return name.replace("fill_", "").replace("_data", "").replace("_", " ").title()
-
-    @staticmethod
-    def _format_countdown(seconds: int) -> str:
-        if seconds < 0:
-            return "Now"
-
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-
-        if hours > 0:
-            return f"{hours}h {minutes}m {secs}s"
-        if minutes > 0:
-            return f"{minutes}m {secs}s"
-        return f"{secs}s"
-
-    def _create_scheduler_table(self) -> Table:
-        table = Table(
-            title="⏰ Следующие задачи",
-            show_header=True,
-            header_style="bold yellow",
-            border_style="bright_black",
-        )
-        table.add_column("Задача", style="cyan", width=25)
-        table.add_column("Через", justify="right", style="green", width=10)
-        table.add_column("В", justify="right", style="yellow", width=8)
-        table.add_column("Запусков", justify="right", style="bright_blue", width=8)
-
-        if not SCHEDULER_TRACKER_AVAILABLE:
-            table.add_row("[dim]Scheduler tracking unavailable[/dim]", "", "", "")
-            return table
-
-        tracker = get_scheduler_tracker()
-        next_jobs = tracker.get_next_jobs(limit=5)
-
-        if not next_jobs:
-            table.add_row("[dim]Нет запланированных задач[/dim]", "", "", "")
-            return table
-
-        for job in next_jobs:
-            name = self._format_job_name(job["name"])
-            countdown = self._format_countdown(job["seconds_until"])
-            next_run_time = job["next_run"].strftime("%H:%M:%S")
-            executions = job.get("executions", 0)
-            table.add_row(name, countdown, next_run_time, str(executions))
-
-        return table
-
-    def _create_stats_table(
-        self,
-        title: str,
-        header_style: str,
-        columns: list[tuple[str, int, str]],
-        stats_getter,
-        empty_msg: str,
-        name_formatter: str | None = None,
-    ) -> Table:
-        table = Table(
-            title=title,
-            show_header=True,
-            header_style=header_style,
-            border_style="bright_black",
+        result = Text()
+        result.append(f"{timestamp} ", style="dim")
+        result.append(
+            f"{level:<7}",
+            style=styles.get(level, "white"),
         )
 
-        for col_name, width, style in columns:
-            table.add_column(col_name, style=style, width=width)
+        message = record.getMessage()
 
-        stats = stats_getter(limit=6)
-        if not stats:
-            table.add_row(f"[dim]{empty_msg}[/dim]", "", "")
-            return table
+        limit = 2000 if LOG_MODE == "debug" else 180
+        if len(message) > limit:
+            message = message[:limit] + "..."
 
-        for *values, last_time in stats:
-            name = values[0]
-            if name_formatter:
-                name = name.replace(name_formatter, "").replace("/", " ")
-            table.add_row(name, str(values[1]), last_time)
+        result.append(" " + message)
 
-        return table
-
-    def _create_api_table(self) -> Table:
-        return self._create_stats_table(
-            title="📊 Вызовы API",
-            header_style="bold magenta",
-            columns=[
-                ("Endpoint", 25, "cyan"),
-                ("Вызовов", 10, "green"),
-                ("Последний", 10, "yellow"),
-            ],
-            stats_getter=api_tracker.get_stats,
-            empty_msg="API вызовов не было",
-            name_formatter="api/",
-        )
-
-    def _create_db_table(self) -> Table:
-        return self._create_stats_table(
-            title="💾 Записи в БД",
-            header_style="bold cyan",
-            columns=[
-                ("Таблица", 20, "cyan"),
-                ("Записей", 10, "green"),
-                ("Последний", 10, "yellow"),
-            ],
-            stats_getter=db_tracker.get_stats,
-            empty_msg="Записей в БД не было",
-            name_formatter="_",
-        )
-
-    def _create_logs_panel(self) -> Panel:
-        # Размер доступной области:
-        # 3 строки заголовка + 13 строк статистики.
-        available_height = max(
-            5,
-            self.console.size.height - 18,
-        )
-
-        # Пока отображаем последние строки,
-        # которые помещаются на экран.
-        visible_logs = self.log_messages[
-            -available_height:
-        ]
-
-        if not visible_logs:
-            logs_text = Text(
-                "Ожидаем логи...",
+        if record.exc_info and LOG_MODE == "debug":
+            details = "".join(
+                traceback.format_exception(
+                    *record.exc_info
+                )
+            )
+            result.append(
+                "\n" + details[-2000:],
                 style="dim",
             )
-        else:
-            logs_text = Text()
 
-            for index, message in enumerate(
-                visible_logs
-            ):
-                if index:
-                    logs_text.append("\n")
+        return result
 
-                logs_text.append(message)
+    def _process_logs(self):
+        while True:
+            try:
+                record = self.log_queue.get_nowait()
+            except queue.Empty:
+                break
 
-        return Panel(
-            logs_text,
-            title=Text(
-                f"📝 Логи "
-                f"({len(self.log_messages)} / "
-                f"{self.max_logs})",
-                style="bold blue",
-            ),
-            border_style="bright_black",
-            height=available_height + 2,
+            if self._visible(record):
+                self.log_messages.append(
+                    self._format_record(record)
+                )
+
+    @staticmethod
+    def _format_date(value):
+        if not value:
+            return "—"
+
+        try:
+            return datetime.fromisoformat(
+                value
+            ).strftime("%d.%m.%Y")
+        except ValueError:
+            return str(value)
+
+    def _header(self, state):
+        reports = state["reports"]
+
+        good = sum(
+            item["ok"] for item in reports
+        )
+        errors = sum(
+            item["errors"] for item in reports
         )
 
-    def _generate_layout(self) -> Layout:
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="stats", size=13),
+        bad_sources = sum(
+            item["last_status"] == "ERROR"
+            for item in reports
+        )
 
-            # Логи занимают всё оставшееся
-            # пространство терминала.
+        ws = state["ws"]["status"]
+
+        now = datetime.now(
+            settings.SCHEDULER_TIMEZONE
+        ).strftime("%H:%M:%S")
+
+        label = Text()
+        label.append("STP PARSER", style="bold cyan")
+        label.append("  |  ", style="dim")
+        label.append(
+            "RUNNING" if state["enabled"] else "PAUSED",
+            style="green" if state["enabled"] else "yellow",
+        )
+
+        label.append(
+            f"  |  Отчётов: {len(reports)}"
+            f"  |  OK: {good}"
+            f"  |  ERR: {errors}",
+        )
+
+        if bad_sources:
+            label.append(
+                f"  |  Проблем: {bad_sources}",
+                style="bold yellow",
+            )
+
+            db_state = (
+                "OK"
+                if state["db_ok"] is True
+                else "ERR"
+                if state["db_ok"] is False
+                else "—"
+            )
+
+            label.append(
+                f"  |  БД: {db_state}",
+                style=(
+                    "green"
+                    if db_state == "OK"
+                    else "yellow"
+                ),
+            )
+
+            label.append(
+                f"  |  OKC: {state['okc_status']}",
+                style=(
+                    "green"
+                    if state["okc_status"] == "OK"
+                    else "yellow"
+                ),
+            )
+
+        label.append(
+            f"  |  WS НТП: {ws}",
+            style="green" if ws == "ONLINE" else "yellow",
+        )
+
+        label.append(
+            f"  |  {now}",
+            style="dim",
+        )
+
+        return Panel(
+            label,
+            border_style="bright_black",
+            padding=(0, 1),
+        )
+
+    def _reports_panel(self, state, visible_rows):
+        reports = list(state["reports"])
+
+        reports.sort(
+            key=lambda item: (
+                item["last_status"] != "ERROR",
+                not item["enabled"],
+                item["description"].casefold(),
+            )
+        )
+
+        total = len(reports)
+        page_count = max(
+            1,
+            ceil(total / visible_rows),
+        )
+
+        # Автопереключение страницы раз в 12 секунд.
+        page = int(
+            time.monotonic() // 12
+        ) % page_count
+
+        offset = page * visible_rows
+        current = reports[
+            offset:offset + visible_rows
+        ]
+
+        table = Table(
+            box=box.SIMPLE_HEAD,
+            expand=True,
+            show_edge=False,
+            padding=(0, 1),
+            header_style="bold bright_cyan",
+        )
+
+        table.add_column(
+            "Отчёт",
+            ratio=4,
+            overflow="ellipsis",
+            no_wrap=True,
+        )
+        table.add_column(
+            "Последняя",
+            justify="center",
+            width=11,
+        )
+        table.add_column(
+            "OK",
+            justify="right",
+            width=5,
+            style="green",
+        )
+        table.add_column(
+            "ERR",
+            justify="right",
+            width=5,
+            style="yellow",
+        )
+        table.add_column(
+            "Статус",
+            justify="center",
+            width=10,
+        )
+
+        for item in current:
+            if not item["enabled"]:
+                status = Text(
+                    "ВЫКЛ.",
+                    style="dim",
+                )
+            elif item["last_status"] == "ERROR":
+                status = Text(
+                    "ОШИБКА",
+                    style="bold red",
+                )
+            elif item["last_status"] == "OK":
+                status = Text(
+                    "УСПЕШНО",
+                    style="green",
+                )
+            elif item["last_success"]:
+                status = Text(
+                    "ОЖИД.",
+                    style="yellow",
+                )
+            else:
+                status = Text(
+                    "НЕТ ДАННЫХ",
+                    style="dim",
+                )
+
+            table.add_row(
+                Text(
+                    item["description"],
+                    style="cyan",
+                    overflow="ellipsis",
+                    no_wrap=True,
+                ),
+                self._format_date(
+                    item["last_success"]
+                ),
+                str(item["ok"]),
+                str(item["errors"]),
+                status,
+            )
+
+        if not current:
+            table.add_row(
+                "Нет настроенных отчётов",
+                "—", "0", "0", "—",
+            )
+
+        title = (
+            f"Отчёты OKC  "
+            f"[{total} источников · "
+            f"страница {page + 1}/{page_count}]"
+        )
+
+        return Panel(
+            table,
+            title=title,
+            border_style="bright_black",
+            padding=(0, 1),
+        )
+
+    def _ws_panel(self, state, compact=False):
+        ws = state["ws"]
+        status = ws["status"]
+
+        color = {
+            "ONLINE": "green",
+            "CONNECTING": "yellow",
+            "OFFLINE": "red",
+        }.get(status, "white")
+
+        result = Text()
+        result.append(
+            f"НТП: {status}",
+            style=f"bold {color}",
+        )
+
+        result.append(
+            f"  |  Последнее сообщение: "
+            f"{ws['last_message_at'] or '—'}"
+            f"  |  Опубликовано: {ws['published']}"
+            f"  |  Ошибок: {ws['publish_errors']}"
+        )
+
+        if not compact:
+            result.append(
+                "\n"
+                f"Подключён с: {ws['connected_at'] or '—'}"
+                f"  |  Переподключений: {ws['reconnects']}"
+            )
+
+            if status == "OFFLINE" and ws["reason"]:
+                result.append(
+                    f"  |  Причина: {ws['reason'][:65]}",
+                    style="yellow",
+                )
+
+        return Panel(
+            result,
+            title="WebSocket · Линия НТП",
+            border_style="bright_black",
+            padding=(0, 1),
+        )
+
+    def _next_panel(self, state, compact=False):
+        now = datetime.now(
+            settings.SCHEDULER_TIMEZONE
+        )
+
+        upcoming = []
+
+        for item in state["reports"]:
+            due = next_report_run(
+                item, now
+            )
+
+            if due is not None:
+                upcoming.append((
+                    due,
+                    item["description"],
+                ))
+
+        upcoming.sort(key=lambda x: x[0])
+
+        count = 1 if compact else 2
+        lines = Text()
+
+        for index, (due, description) in enumerate(
+            upcoming[:count]
+        ):
+            if index:
+                lines.append("\n")
+
+            if due <= now.replace(tzinfo=None):
+                when = "ожидает запуска"
+            else:
+                when = due.strftime(
+                    "%d.%m %H:%M"
+                )
+
+            lines.append(
+                f"{when}  ",
+                style="yellow",
+            )
+            lines.append(
+                description[:80],
+                style="cyan",
+            )
+
+        if not upcoming:
+            lines.append(
+                "Активных выгрузок нет",
+                style="dim",
+            )
+
+        return Panel(
+            lines,
+            title="Ближайшие выгрузки",
+            border_style="bright_black",
+            padding=(0, 1),
+        )
+
+    def _logs_panel(self, height):
+        available = max(1, height - 2)
+        recent = list(
+            self.log_messages
+        )[-available:]
+
+        output = Text()
+
+        if not recent:
+            output.append(
+                "Новых событий нет",
+                style="dim",
+            )
+
+        for index, record in enumerate(recent):
+            if index:
+                output.append("\n")
+            output.append(record)
+
+        return Panel(
+            output,
+            title=f"События · {LOG_MODE}",
+            border_style="bright_black",
+            padding=(0, 1),
+        )
+
+    def _generate_layout(self):
+        state = monitor.snapshot()
+
+        height = max(
+            20,
+            self.console.size.height,
+        )
+
+        compact = height < 28
+
+        ws_size = 3 if compact else 4
+        next_size = 3 if compact else 4
+        min_logs = 5 if compact else 7
+
+        visible_rows = max(
+            2,
+            min(
+                9,
+                height - (
+                    3 + ws_size + next_size
+                    + min_logs + 4
+                ),
+            ),
+        )
+
+        report_size = visible_rows + 4
+
+        layout = Layout()
+
+        layout.split_column(
+            Layout(
+                name="header",
+                size=3,
+            ),
+            Layout(
+                name="reports",
+                size=report_size,
+            ),
+            Layout(
+                name="ws",
+                size=ws_size,
+            ),
+            Layout(
+                name="next",
+                size=next_size,
+            ),
             Layout(
                 name="logs",
                 ratio=1,
-                minimum_size=7,
+                minimum_size=min_logs,
             ),
         )
 
-        total_api_calls = api_tracker.get_total_calls()
-        total_db_writes = db_tracker.get_total_writes()
-
-        header_text = Text()
-        header_text.append("🚀 ", style="bold red")
-        header_text.append("Парсер STP", style="bold white")
-        header_text.append("  |  ", style="dim")
-        header_text.append("API: ", style="dim")
-        header_text.append(str(total_api_calls), style="bold green")
-        header_text.append("  |  ", style="dim")
-        header_text.append("БД: ", style="dim")
-        header_text.append(str(total_db_writes), style="bold cyan")
-        header_text.append(f"  |  {datetime.now().strftime('%H:%M:%S')}", style="dim")
-
-        if SCHEDULER_TRACKER_AVAILABLE:
-            tracker = get_scheduler_tracker()
-            status = tracker.get_scheduler_status()
-
-            if status["next_job"]:
-                next_job = status["next_job"]
-                countdown = self._format_countdown(next_job["seconds_until"])
-                task_name = self._format_job_name(next_job["name"])
-                header_text.append("  |  ", style="dim")
-                header_text.append("Следующая задача: ", style="dim")
-                header_text.append(f"{task_name} in {countdown}", style="bold yellow")
-
         layout["header"].update(
-            Panel(header_text, border_style="bright_black", padding=(0, 1))
+            self._header(state)
+        )
+        layout["reports"].update(
+            self._reports_panel(
+                state, visible_rows
+            )
+        )
+        layout["ws"].update(
+            self._ws_panel(
+                state, compact
+            )
+        )
+        layout["next"].update(
+            self._next_panel(
+                state, compact
+            )
         )
 
-        scheduler_table = self._create_scheduler_table()
-        api_table = self._create_api_table()
-        db_table = self._create_db_table()
-        layout["stats"].update(
-            Columns([scheduler_table, api_table, db_table], equal=True)
+        remaining = height - (
+            3 + report_size
+            + ws_size + next_size
         )
-        layout["logs"].update(self._create_logs_panel())
+
+        layout["logs"].update(
+            self._logs_panel(remaining)
+        )
 
         return layout
 
-    def _update_loop(self) -> None:
-        try:
-            while self._running:
-                try:
-                    self._process_logs()
-                    self._live.update(self._generate_layout())
-                    time.sleep(1.0 / self.refresh_per_second)
-                except Exception:
-                    if not self._running:
-                        break
-        except (Exception, KeyboardInterrupt):
-            pass
-        finally:
-            if self._live:
-                try:
-                    self._live.stop()
-                except (Exception, KeyboardInterrupt):
-                    pass
+    def _update_loop(self):
+        while self._running:
+            try:
+                self._process_logs()
 
-    def start(self) -> None:
+                if self._live:
+                    self._live.update(
+                        self._generate_layout()
+                    )
+
+            except Exception:
+                # Ошибка интерфейса не должна
+                # останавливать сбор отчётов.
+                pass
+
+            time.sleep(
+                1.0 / self.refresh_per_second
+            )
+
+    def start(self):
         if self._running:
             return
 
         self._running = True
 
         self._live = Live(
-            Text("Запускаем дашборд...", style="dim"),
+            Text("Запуск мониторинга..."),
             console=self.console,
             refresh_per_second=self.refresh_per_second,
         )
 
         try:
             self._live.start()
-        except Exception as e:
-            self.console.print(f"Failed to start Live display: {e}")
+        except Exception:
             self._running = False
-            return
+            raise
 
-        self._update_thread = threading.Thread(target=self._update_loop, daemon=True)
+        self._update_thread = threading.Thread(
+            target=self._update_loop,
+            daemon=True,
+        )
         self._update_thread.start()
 
-    def stop(self) -> None:
+    def stop(self):
         if not self._running:
             return
+
         self._running = False
+
+        if self._update_thread:
+            self._update_thread.join(timeout=2)
+
+        if self._live:
+            self._live.stop()
 
     def __enter__(self):
         self.start()
@@ -343,14 +644,15 @@ class CLIDashboard:
         self.stop()
 
 
-_dashboard: CLIDashboard | None = None
+_dashboard = None
 _dashboard_lock = threading.Lock()
 
 
-def get_dashboard() -> CLIDashboard:
+def get_dashboard():
     global _dashboard
 
     with _dashboard_lock:
         if _dashboard is None:
             _dashboard = CLIDashboard()
+
         return _dashboard

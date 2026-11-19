@@ -111,6 +111,11 @@ class Settings(BaseSettings):
 
     # Dashboard settings
     ENABLE_DASHBOARD: bool = True
+    PARSER_LOG_MODE: Literal[
+        "short",
+        "normal",
+        "debug",
+    ] = "normal"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

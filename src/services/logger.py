@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from src.core.config import settings
 
 try:
     from src.services.cli_dashboard import get_dashboard
@@ -11,7 +12,11 @@ except ImportError:
 
 
 def setup_logging(use_dashboard: bool = True) -> None:
-    log_level = logging.INFO
+    log_level = (
+        logging.DEBUG
+        if settings.PARSER_LOG_MODE == "debug"
+        else logging.INFO
+    )
 
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
