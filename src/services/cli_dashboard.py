@@ -371,7 +371,7 @@ class CLIDashboard:
         ).strftime("%H:%M:%S")
 
         label = Text()
-        label.append("STP PARSER", style="bold cyan")
+        label.append("STP PARSER: ", style="bold cyan")
         label.append(
             "RUNNING" if state["enabled"] else "PAUSED",
             style="green" if state["enabled"] else "yellow",
