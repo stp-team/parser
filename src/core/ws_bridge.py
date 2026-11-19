@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 OKC_NOTIFICATION_RECIPIENT_IDS = [
     7920,
     7585,
-    8249,
+    8429,
 ]
 
 LINE_DISPLAY_NAMES = {
@@ -391,7 +391,7 @@ class WebSocketBridge:
                 body="Состояние очереди обновлено",
                 payload=payload,
                 recipients=NotificationRecipients(
-                    include_ids=[7920, 7585],
+                    include_ids=[7920, 7585, 8429],
                 ),
             )
 

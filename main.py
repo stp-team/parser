@@ -228,6 +228,17 @@ async def main():
         await parser_event_service.service_started()
         parser_started = True
 
+        # Запускаем получение очередей и аварий
+        # из WebSocket OKC.
+        await setup_ws_bridges(
+            okc_client,
+            lines=["ntp"],
+        )
+
+        logger.info(
+            "WebSocket-мониторинг линии НТП запущен"
+        )
+
         await run_dynamic_reports_loop(okc_client)
 
     except Exception as e:
