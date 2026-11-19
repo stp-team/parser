@@ -209,8 +209,8 @@ async def main():
     # WebSocket-мониторинга линии НТП.
     # Не зависит от сессий выгрузки отчётов.
     ws_okc_client = OKC(
-        username=settings.OKC_USERNAME,
-        password=settings.OKC_PASSWORD,
+        username=settings.OKC_WS_USERNAME,
+        password=settings.OKC_WS_PASSWORD,
         settings=Settings(
             BASE_URL=settings.OKC_BASE_URL
         ),

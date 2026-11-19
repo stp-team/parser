@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     OKC_USERNAME: str
     OKC_PASSWORD: str
     OKC_BASE_URL: str
+    OKC_WS_USERNAME: str
+    OKC_WS_PASSWORD: str
 
     # REDIS
     REDIS_HOST: str = '127.0.0.1'
