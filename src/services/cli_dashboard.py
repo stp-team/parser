@@ -417,7 +417,7 @@ class CLIDashboard:
             f"  |  "
         )
         label.append(
-            f"OKC: {okc_status}",
+            f"OKC API: {okc_status}",
             style=(
                 "green"
                 if okc_status == "OK"
@@ -504,7 +504,7 @@ class CLIDashboard:
         # Время планового опроса уже наступило,
         # но успешной выгрузки за текущий цикл нет.
         if due:
-            return "ОЖИДАНИЕ", "yellow", "waiting"
+            return "НЕТ ЗАПРОСОВ", "yellow", "waiting"
 
         last_success = item.get("last_success")
 
@@ -514,7 +514,7 @@ class CLIDashboard:
         if last_success:
             return "ПО ПЛАНУ", "green", "scheduled"
 
-        return "НЕТ ДАННЫХ", "dim", "empty"
+        return "ОШИБКА", "dim", "empty"
 
     def _reports_panel(self, state, visible_rows):
         """Группировка отчётов с ручной пагинацией."""
