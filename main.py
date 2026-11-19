@@ -205,6 +205,17 @@ async def main():
         ),
     )
 
+    # Отдельный клиент для постоянного
+    # WebSocket-мониторинга линии НТП.
+    # Не зависит от сессий выгрузки отчётов.
+    ws_okc_client = OKC(
+        username=settings.OKC_USERNAME,
+        password=settings.OKC_PASSWORD,
+        settings=Settings(
+            BASE_URL=settings.OKC_BASE_URL
+        ),
+    )
+
     parser_started = False
 
     if dashboard:
@@ -228,17 +239,26 @@ async def main():
         await parser_event_service.service_started()
         parser_started = True
 
-        # Запускаем получение очередей и аварий
-        # из WebSocket OKC.
-        await setup_ws_bridges(
-            okc_client,
-            lines=["ntp"],
-        )
+        try:
+            await ws_okc_client.connect()
 
-        logger.info(
-            "WebSocket-мониторинг линии НТП запущен"
-        )
+            await setup_ws_bridges(
+                ws_okc_client,
+                lines=["ntp"],
+            )
 
+            logger.info(
+                "WebSocket-мониторинг НТП запущен"
+            )
+
+        except Exception:
+            logger.exception(
+                "Не удалось запустить WebSocket "
+                "OKC. Выгрузка отчётов продолжит работу."
+            )
+
+        # Основная работа парсера не зависит
+        # от состояния WebSocket-мониторинга.
         await run_dynamic_reports_loop(okc_client)
 
     except Exception as e:
@@ -275,6 +295,17 @@ async def main():
             logger.warning(
                 "Ошибка при закрытии "
                 f"WebSocket bridges: {e}"
+            )
+
+        # После остановки WebSocket
+        # закрываем его отдельную HTTP-сессию.
+        try:
+            await ws_okc_client.close()
+
+        except Exception as e:
+            logger.warning(
+                "Ошибка закрытия OKC WS клиента: %s",
+                e,
             )
 
         if parser_started:
