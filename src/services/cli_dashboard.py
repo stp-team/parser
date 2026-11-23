@@ -713,11 +713,14 @@ class CLIDashboard:
         }.get(status, "white")
 
         result = Text()
+
         result.append(
             f"НТП: {status}",
             style=f"bold {color}",
         )
 
+        # Время последнего опубликованного
+        # сообщения не меняем.
         result.append(
             f"  |  Последнее сообщение: "
             f"{ws['last_message_at'] or '—'}"
@@ -732,10 +735,21 @@ class CLIDashboard:
                 f"  |  Переподключений: {ws['reconnects']}"
             )
 
-            if status == "OFFLINE" and ws["reason"]:
+            # При сбое показываем понятную
+            # категорию вместо длинного
+            # технического сообщения.
+            error_kind = ws.get("error_kind")
+
+            if status != "ONLINE" and error_kind:
+                error_color = (
+                    "cyan"
+                    if error_kind == "Плановое обновление"
+                    else "yellow"
+                )
+
                 result.append(
-                    f"  |  Причина: {ws['reason'][:65]}",
-                    style="yellow",
+                    f"  |  {error_kind}",
+                    style=error_color,
                 )
 
         return Panel(

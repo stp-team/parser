@@ -26,6 +26,7 @@ class ParserMonitor:
             "reconnects": 0,
             "was_online": False,
             "reason": None,
+            "error_kind": None,
         }
 
     @staticmethod
@@ -137,13 +138,21 @@ class ParserMonitor:
     def ws_connected(self):
         with self._lock:
             self._ws["status"] = "ONLINE"
+
+            # Формат: DD.MM HH:MM
             self._ws["connected_at"] = (
-                self._now().strftime("%H:%M:%S")
+                self._now().strftime("%d.%m %H:%M")
             )
+
             self._ws["was_online"] = True
             self._ws["reason"] = None
+            self._ws["error_kind"] = None
 
-    def ws_disconnected(self, reason=None):
+    def ws_disconnected(
+            self,
+            reason=None,
+            kind=None,
+    ):
         with self._lock:
             self._ws["status"] = "OFFLINE"
             self._ws["reason"] = (
@@ -151,6 +160,7 @@ class ParserMonitor:
                 if reason is not None
                 else None
             )
+            self._ws["error_kind"] = kind
 
     def ws_published(self):
         with self._lock:

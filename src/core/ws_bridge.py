@@ -7,6 +7,17 @@ import re
 import json
 from typing import Any
 
+from aiohttp import (
+    ClientConnectionError,
+    ClientResponseError,
+)
+
+from okc_py.exceptions import (
+    AuthenticationError,
+    CSRFError,
+    InvalidCredentialsError,
+)
+
 from src.services.monitor_state import monitor
 from okc_py import OKC
 from stp_redis import (
@@ -21,6 +32,55 @@ from src.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
 
+def classify_ws_error(exc: Exception) -> str:
+    """
+    Определяет понятную категорию
+    ошибки подключения OKC.
+    """
+
+    # Ошибки входа в OKC.
+    if isinstance(
+        exc,
+        (
+            AuthenticationError,
+            InvalidCredentialsError,
+            CSRFError,
+        ),
+    ):
+        return "Ошибка авторизации"
+
+    # HTTP/WebSocket ответ с кодом ошибки.
+    if isinstance(exc, ClientResponseError):
+        if exc.status in (401, 403):
+            return "Ошибка авторизации"
+
+        return "Ошибка подключения"
+
+    # Ошибки подключения к серверу,
+    # обрывы TCP и тайм-ауты.
+    if isinstance(
+        exc,
+        (
+            ClientConnectionError,
+            ConnectionError,
+            TimeoutError,
+            OSError,
+        ),
+    ):
+        return "Ошибка сети"
+
+    # Локальная сессия не была создана
+    # или недоступна.
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+
+        if (
+            "session not initialized" in message
+            or "session not connected" in message
+        ):
+            return "Ошибка сессии"
+
+    return "Ошибка WebSocket"
 
 # Уведомления OKC отправляются ТОЛЬКО этим пользователям.
 OKC_NOTIFICATION_RECIPIENT_IDS = [
@@ -62,6 +122,10 @@ class WebSocketBridge:
 
         self._reconnect_delay = 5
 
+        # Плановая повторная авторизация
+        # и подключение каждые 12 часов.
+        self._session_renewal_seconds = 12 * 60 * 60
+
         # Тот же RedisNotificationService,
         # который используется API.
         #
@@ -70,7 +134,14 @@ class WebSocketBridge:
         # REDIS_NOTIFICATION_STREAM.
 
     async def start(self) -> None:
-        """Запустить WebSocket линии и поддерживать соединение."""
+        """
+        Постоянное WebSocket-соединение OKC.
+
+        - Повторная авторизация каждые 12 часов.
+        - Восстановление при обрыве.
+        - Повторные попытки каждые 5 секунд.
+        - Независимость от выгрузки отчётов.
+        """
 
         logger.info(
             "[%s] Starting OKC WebSocket bridge",
@@ -84,16 +155,15 @@ class WebSocketBridge:
             )
 
         except AttributeError:
-            logger.error(
+            logger.exception(
                 "[%s] Unknown OKC line",
                 self.line_name,
             )
             raise
 
-        # Обработчик регистрируем ДО connect().
-        #
-        # OKC может прислать message сразу
-        # после установки соединения.
+        # Подписываемся на события только
+        # один раз, без дублирования
+        # обработчиков при переподключениях.
         self.line.on(
             "message",
             self._on_message,
@@ -110,79 +180,183 @@ class WebSocketBridge:
         )
 
         self.is_running = True
+        loop = asyncio.get_running_loop()
 
         while self.is_running:
+            planned_rotation = False
+
             try:
+                monitor.ws_connecting()
+
+                logger.info(
+                    "[%s] Authorizing OKC session...",
+                    self.line_name,
+                )
+
+                # Закрываем предыдущую HTTP-сессию,
+                # если она существует.
+                await self.okc_client.close()
+
+                # Создаём новую сессию и
+                # повторно авторизуемся в OKC.
+                await self.okc_client.connect()
+
+                logger.info(
+                    "[%s] OKC session authenticated",
+                    self.line_name,
+                )
+
                 logger.info(
                     "[%s] Connecting to OKC WebSocket...",
                     self.line_name,
                 )
 
-                monitor.ws_connecting()
                 await self.line.connect()
+
                 monitor.ws_connected()
 
+                connected_at = loop.time()
+
+                # Следующее плановое обновление
+                # через 12 часов от успешного
+                # подключения WebSocket.
+                renewal_deadline = (
+                        connected_at
+                        + self._session_renewal_seconds
+                )
+
                 logger.info(
-                    "[%s] OKC WebSocket connected",
+                    "[%s] OKC WebSocket connected. "
+                    "Next renewal in 12 hours.",
                     self.line_name,
                 )
 
                 while (
-                    self.is_running
-                    and self.line.is_connected
+                        self.is_running
+                        and self.line.is_connected
                 ):
-                    await asyncio.sleep(5)
+                    remaining = (
+                            renewal_deadline - loop.time()
+                    )
+
+                    if remaining <= 0:
+                        planned_rotation = True
+
+                        logger.info(
+                            "[%s] Scheduled 12-hour "
+                            "session renewal",
+                            self.line_name,
+                        )
+
+                        monitor.ws_disconnected(
+                            reason=(
+                                "Плановое обновление "
+                                "сессии OKC"
+                            ),
+                            kind="Плановое обновление",
+                        )
+
+                        break
+
+                    await asyncio.sleep(
+                        min(5.0, remaining)
+                    )
 
                 if not self.is_running:
                     break
 
-                logger.warning(
-                    "[%s] OKC WebSocket disconnected",
-                    self.line_name,
-                )
+                if not planned_rotation:
+                    # WebSocket перестал быть
+                    # подключённым раньше срока.
+                    logger.warning(
+                        "[%s] WebSocket connection closed",
+                        self.line_name,
+                    )
 
-                monitor.ws_disconnected(
-                    "Соединение закрыто"
-                )
+                    monitor.ws_disconnected(
+                        reason=(
+                            "Соединение с OKC "
+                            "закрылось раньше срока"
+                        ),
+                        kind="Соединение закрыто",
+                    )
 
             except asyncio.CancelledError:
+                monitor.ws_disconnected(
+                    reason="Задача мониторинга остановлена",
+                    kind="Остановлено",
+                )
+
                 logger.info(
                     "[%s] WebSocket bridge cancelled",
                     self.line_name,
                 )
-                monitor.ws_disconnected(
-                    "Задача остановлена"
-                )
+
                 raise
 
-            except Exception as e:
+            except Exception as exc:
+                error_kind = classify_ws_error(exc)
+
                 monitor.ws_disconnected(
-                    f"{type(e).__name__}: {e}"
-                )
-                logger.error(
-                    "[%s] WebSocket error: %s",
-                    self.line_name,
-                    e,
-                    exc_info=True,
+                    reason=str(exc),
+                    kind=error_kind,
                 )
 
-            try:
-                if self.line:
-                    await self.line.disconnect()
+                # Ожидаемые сетевые сбои
+                # не засоряем длинными traceback
+                # при каждой повторной попытке.
+                if error_kind in (
+                        "Ошибка сети",
+                        "Ошибка авторизации",
+                        "Ошибка сессии",
+                        "Ошибка подключения",
+                ):
+                    logger.warning(
+                        "[%s] %s: %s",
+                        self.line_name,
+                        error_kind,
+                        exc,
+                    )
+                else:
+                    logger.exception(
+                        "[%s] %s",
+                        self.line_name,
+                        error_kind,
+                    )
 
-            except Exception:
-                pass
+            finally:
+                # Отключаем старый WebSocket.
+                # При следующем проходе цикла
+                # будет новая авторизация.
+                if self.line is not None:
+                    try:
+                        await self.line.disconnect()
 
-            if self.is_running:
-                logger.info(
-                    "[%s] Reconnecting in %s seconds...",
-                    self.line_name,
-                    self._reconnect_delay,
-                )
+                    except Exception:
+                        logger.exception(
+                            "[%s] Failed to disconnect "
+                            "old WebSocket",
+                            self.line_name,
+                        )
 
-                await asyncio.sleep(
-                    self._reconnect_delay
-                )
+            if not self.is_running:
+                break
+
+            if planned_rotation:
+                # Плановое переподключение
+                # выполняем без дополнительной
+                # пятисекундной паузы.
+                continue
+
+            logger.info(
+                "[%s] Reconnecting in %s seconds...",
+                self.line_name,
+                self._reconnect_delay,
+            )
+
+            await asyncio.sleep(
+                self._reconnect_delay
+            )
 
     @staticmethod
     def _html_to_text(

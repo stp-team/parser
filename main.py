@@ -240,8 +240,9 @@ async def main():
         parser_started = True
 
         try:
-            await ws_okc_client.connect()
-
+            # Мост самостоятельно создаёт
+            # OKC-сессию, авторизуется
+            # и восстанавливает подключение.
             await setup_ws_bridges(
                 ws_okc_client,
                 lines=["ntp"],
