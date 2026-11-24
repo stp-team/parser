@@ -850,6 +850,7 @@ async def save_refresh_report(
     name: str,
     period: str,
     raw_result: str,
+    monthly_eos_names: list[str] | None = None,
 ) -> None:
     """
     Сохраняет актуальный premium/tutors отчёт.
@@ -864,7 +865,7 @@ async def save_refresh_report(
 
             result = await session.execute(
                 text("""
-                    SELECT uuid, check_status
+                    SELECT uuid, check_status, check_result 
                     FROM `ParserReports`
                     WHERE link_name = :name
                       AND period_of_dates = :label
@@ -894,6 +895,101 @@ async def save_refresh_report(
                     f"{name}: предыдущий отчёт "
                     "ещё не обработан"
                 )
+
+            if existing_report and monthly_eos_names is not None:
+                old_result = existing_report["check_result"]
+
+                if isinstance(old_result, str):
+                    old_result = json.loads(old_result)
+
+                if not isinstance(old_result, dict):
+                    raise RuntimeError(
+                        "TUTORS: нет метаданных предыдущего отчёта"
+                    )
+
+                old_month_raw = old_result.get(
+                    "extraction_period"
+                )
+
+                if not old_month_raw:
+                    raise RuntimeError(
+                        "TUTORS: неизвестен предыдущий месяц"
+                    )
+
+                old_month = datetime.strptime(
+                    old_month_raw,
+                    "%Y-%m-%d",
+                ).date()
+
+                # Проверяем, что старый месяц действительно
+                # был обработан AchievementService.
+                from calendar import monthrange
+
+                last_day = monthrange(
+                    old_month.year,
+                    old_month.month,
+                )[1]
+
+                label = (
+                    f"{old_month:%d.%m.%Y}-"
+                    f"{old_month.replace(day=last_day):%d.%m.%Y}"
+                )
+
+                if not monthly_eos_names:
+                    raise RuntimeError(
+                        "TUTORS: не настроены месячные EOS"
+                    )
+
+                result = await session.execute(
+                    text("""
+                         SELECT link_name,
+                                check_status,
+                                check_result
+                         FROM ParserReports
+                         WHERE link_name IN :names
+                           AND period_type = 'm'
+                           AND period_of_dates = :period_label
+                         """).bindparams(
+                        bindparam("names", expanding=True)
+                    ),
+                    {
+                        "names": monthly_eos_names,
+                        "period_label": label,
+                    },
+                )
+
+                checked_names = set()
+
+                for eos_row in result.mappings():
+                    meta = eos_row["check_result"]
+
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except ValueError:
+                            meta = None
+
+                    if not isinstance(meta, dict):
+                        continue
+
+                    if (
+                            eos_row["check_status"] == "done"
+                            and meta.get("extraction_period")
+                            == old_month.isoformat()
+                            and meta.get("achievements_checked_at")
+                    ):
+                        checked_names.add(eos_row["link_name"])
+
+                pending = (
+                        set(monthly_eos_names) - checked_names
+                )
+
+                if pending:
+                    raise RuntimeError(
+                        "TUTORS: предыдущий месяц ещё "
+                        "не прошёл начисление достижений. "
+                        f"Ожидаются EOS: {sorted(pending)}"
+                    )
 
             if report_uuid is None:
                 # Первая успешная выгрузка.
@@ -1073,6 +1169,17 @@ async def collect_reports(okc: OKC) -> None:
     try:
         await okc.connect()
 
+        monthly_eos_names = [
+            item["name"]
+            for item in links
+            if (
+                    item["enabled"]
+                    and item["resource_type"] == "eos"
+                    and item["period"] == "m"
+                    and item.get("distribution_rules") is not None
+            )
+        ]
+
         for (
             link,
             start_date,
@@ -1125,6 +1232,11 @@ async def collect_reports(okc: OKC) -> None:
                         link["name"],
                         link["period"],
                         raw_result,
+                        monthly_eos_names=(
+                            monthly_eos_names
+                            if resource_type == "tutors"
+                            else None
+                        ),
                     )
 
                 successful += 1
