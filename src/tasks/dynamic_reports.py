@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
+from urllib.parse import urlencode
 
 from src.services.monitor_state import monitor
 
@@ -141,6 +142,35 @@ async def read_parser_settings() -> tuple[bool, list[dict[str, Any]]]:
         if resource_type not in {"eos", "premium", "tutors"}:
             raise ValueError(f"Некорректный resource_type: {link['name']}")
         link["resource_type"] = resource_type
+
+        if resource_type == "tutors":
+            if link["period"] != "m":
+                raise ValueError(
+                    f"{link['name']}: tutors требует period=m"
+                )
+
+            first_period = link.get("first_period")
+
+            try:
+                parsed = datetime.strptime(
+                    first_period, "%m.%Y"
+                )
+                if parsed.strftime("%m.%Y") != first_period:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{link['name']}: first_period "
+                    "должен иметь формат MM.YYYY"
+                )
+
+            if link["url"].split("?")[0].rstrip(
+                    "/"
+            ).endswith(
+                "/tutor-graph/tutor-api/get-full-graph"
+            ) is False:
+                raise ValueError(
+                    f"{link['name']}: неверный endpoint tutors"
+                )
 
         if not isinstance(link["payload"], dict):
             raise ValueError(f"Некорректный payload: {link['name']}")
@@ -510,6 +540,97 @@ def validate_premium_response(
         len(not_eligible),
     )
 
+def validate_tutors_response(
+    raw_result: str,
+    expected_month: str,
+) -> None:
+    """Структурная проверка графика наставников."""
+
+    import calendar
+
+    try:
+        data = json.loads(raw_result)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "TUTORS: OKC вернул некорректный JSON"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            "TUTORS: ожидался JSON-объект"
+        )
+
+    tutors = data.get("tutors")
+    days = data.get("days")
+
+    if (
+        not isinstance(tutors, list)
+        or not tutors
+        or not isinstance(days, list)
+    ):
+        raise ValueError(
+            "TUTORS: отсутствуют tutors/days "
+            "или пустой график"
+        )
+
+    month = datetime.strptime(
+        expected_month, "%m.%Y"
+    ).date()
+
+    count = calendar.monthrange(
+        month.year, month.month
+    )[1]
+
+    expected = {
+        date.strftime("%d.%m.%Y")
+        for date in (
+            month + timedelta(days=offset)
+            for offset in range(count)
+        )
+    }
+
+    actual = {
+        day.get("day")
+        for day in days
+        if isinstance(day, dict)
+    }
+
+    if (
+        len(days) != count
+        or actual != expected
+    ):
+        raise ValueError(
+            "TUTORS: OKC вернул неполный "
+            "или неверный месяц"
+        )
+
+    for index, tutor in enumerate(tutors):
+        if not isinstance(tutor, dict):
+            raise ValueError(
+                f"TUTORS: запись {index} не объект"
+            )
+
+        info = tutor.get("tutorInfo")
+
+        if (
+            not isinstance(info, dict)
+            or not info.get("employeeId")
+            or not isinstance(tutor.get("shifts"), list)
+            or not isinstance(tutor.get("trainees"), list)
+        ):
+            raise ValueError(
+                f"TUTORS: повреждена запись {index}"
+            )
+
+        if (
+            len(tutor["shifts"]) != count
+            or len(tutor["trainees"]) != count
+        ):
+            raise ValueError(
+                f"TUTORS: неполный график "
+                f"employeeId={info['employeeId']}"
+            )
+
 async def fetch_raw_report(
     okc: OKC,
     link: dict[str, Any],
@@ -564,9 +685,21 @@ async def fetch_raw_report(
         )
 
     elif resource_type == "tutors":
-        # Для наставников ничего автоматически
-        # в payload не добавляем.
-        pass
+        now = datetime.now(settings.SCHEDULER_TIMEZONE)
+
+        # Наставники: предыдущий полный месяц.
+        month_start = now.date().replace(day=1)
+        previous_month_end = month_start - timedelta(days=1)
+        previous_month_start = (previous_month_end.replace(day=1))
+        payload["startDate"] = (previous_month_start.strftime("%d.%m.%Y"))
+        payload["stopDate"] = (month_start.strftime("%d.%m.%Y"))
+
+        logger.info(
+            "[TUTORS] %s | месяц=%s",
+            link["name"],
+            previous_month_start.strftime("%m.%Y"),
+        )
+
 
     else:
         raise ValueError(
@@ -587,10 +720,44 @@ async def fetch_raw_report(
         json.dumps(payload, ensure_ascii=False),
     )
 
+    request_kwargs = {
+        "timeout": ClientTimeout(total=120),
+    }
+
+    if resource_type == "tutors":
+        form_fields = []
+
+        for key, value in payload.items():
+            if isinstance(value, list):
+                for item in value:
+                    form_fields.append(
+                        (f"{key}[]", str(item))
+                    )
+
+            elif value is not None:
+                form_fields.append(
+                    (key, str(value))
+                )
+
+        request_kwargs["data"] = urlencode(
+            form_fields
+        ).encode("utf-8")
+
+        request_kwargs["headers"] = {
+            "Content-Type": (
+                "application/x-www-form-urlencoded; "
+                "charset=UTF-8"
+            ),
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json",
+        }
+
+    else:
+        request_kwargs["json"] = payload
+
     async with session.post(
-        url,
-        json=payload,
-        timeout=ClientTimeout(total=120),
+            url,
+            **request_kwargs,
     ) as response:
         if response.status >= 400:
             error_body = await response.text()
@@ -697,7 +864,7 @@ async def save_refresh_report(
 
             result = await session.execute(
                 text("""
-                    SELECT uuid
+                    SELECT uuid, check_status
                     FROM `ParserReports`
                     WHERE link_name = :name
                       AND period_of_dates = :label
@@ -711,7 +878,22 @@ async def save_refresh_report(
                 },
             )
 
-            report_uuid = result.scalar_one_or_none()
+            existing_report = result.mappings().first()
+
+            report_uuid = (
+                existing_report["uuid"]
+                if existing_report
+                else None
+            )
+
+            if (
+                    existing_report
+                    and existing_report["check_status"] != "done"
+            ):
+                raise RuntimeError(
+                    f"{name}: предыдущий отчёт "
+                    "ещё не обработан"
+                )
 
             if report_uuid is None:
                 # Первая успешная выгрузка.
@@ -816,6 +998,21 @@ async def collect_reports(okc: OKC) -> None:
         resource_type = link["resource_type"]
         period = link["period"]
 
+        if resource_type == "tutors":
+            first = datetime.strptime(
+                link["first_period"], "%m.%Y"
+            ).date().replace(day=1)
+
+            # За какой законченный месяц сейчас
+            # должна выполняться выгрузка.
+            month_start = now.date().replace(day=1)
+            requested_month = (
+                    month_start - timedelta(days=1)
+            ).replace(day=1)
+
+            if requested_month < first:
+                continue
+
         if resource_type == "eos":
             # Старое поведение eos:
             # period определяет даты отчёта.
@@ -899,6 +1096,17 @@ async def collect_reports(okc: OKC) -> None:
                     start_date,
                     stop_date,
                 )
+
+                if resource_type == "tutors":
+                    expected_month = (
+                            now.date().replace(day=1)
+                            - timedelta(days=1)
+                    ).strftime("%m.%Y")
+
+                    validate_tutors_response(
+                        raw_result,
+                        expected_month,
+                    )
 
                 if resource_type == "eos":
                     # Отдельная историческая запись
